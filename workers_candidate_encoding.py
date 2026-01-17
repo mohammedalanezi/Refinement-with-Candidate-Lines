@@ -212,7 +212,7 @@ def parseSolution(self: decode.SATDecoder) -> str:
 		return f"No solution found, and so no refinement exists for template-{template_id}."
 
 if __name__ == "__main__": # initial setup # previously line 209
-	rewrite = False
+	rewrite = True
 	
 	print("Loading candidate lines from:", candidate_lines_2_path)
 	load_candidate_lines_file(candidate_lines_2_path, 0)
@@ -424,5 +424,6 @@ if __name__ == "__main__": # initial setup # previously line 209
 	else:
 		wall_time = decoding.run_sat_solver(satsolver_path, input_path, [], True)
 		print("\n" + str(decoding))
+
 
 
