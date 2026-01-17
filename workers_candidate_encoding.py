@@ -103,13 +103,14 @@ def process_A_solution(selected_A, template_id, candidate_line_count, point_to_B
 	"""
 	try:
 		solution_id = hash(str(selected_A)) % 1000000 # create unique identifier for this A configuration
+		wall_time = time.time()
 
 		invalidReturn = {
 				'solution_id': solution_id,
 				'selected_A': selected_A,
 				'num_valid_Bs': len([]),
 				'valid_Bs': [],
-				'wall_time': 0,
+				'wall_time': wall_time - time.time(),
 				'status': 'success'
 			}
 		
@@ -125,6 +126,7 @@ def process_A_solution(selected_A, template_id, candidate_line_count, point_to_B
 				possible_B_lines.append(j)
 		
 		if len(possible_B_lines) < 10:
+			invalidReturn['wall_time'] = float(time.time() - wall_time)
 			return invalidReturn
 		
 		# build new SAT instance for finding all valid B configurations
@@ -140,9 +142,12 @@ def process_A_solution(selected_A, template_id, candidate_line_count, point_to_B
 				b_lines = [b[i] for i in b_indices if i in possible_B_lines]
 				if len(b_lines) > 0:
 					encoding_secondary.add_forced_cardinality_clause(b_lines, 1, 1)
-				else:
+				else: # this point has no coverings, thus we cannot cover all 100 points with lines our truncated lines in B, end early 
+					invalidReturn['wall_time'] = float(time.time() - wall_time)
 					return invalidReturn
 		
+		print(len(possible_B_lines))
+
 		encoding_secondary.finalize_encoding()
 
 		def parse_secondary_solution(decoder: decode.SATDecoder) -> str:
