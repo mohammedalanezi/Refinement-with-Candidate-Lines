@@ -146,7 +146,7 @@ def process_A_solution(selected_A, template_id, candidate_line_count, point_to_B
 					invalidReturn['wall_time'] = float(time.time() - wall_time)
 					return invalidReturn
 		
-		print(len(possible_B_lines))
+		print(len(possible_B_lines)) # I haven't seen an A refinement ever have the correct possible B lines to reach this point.
 
 		encoding_secondary.finalize_encoding()
 
@@ -424,3 +424,4 @@ if __name__ == "__main__": # initial setup
 	else:
 		wall_time = decoding.run_sat_solver(satsolver_path, input_path, [], True)
 		print("\n" + str(decoding))
+
