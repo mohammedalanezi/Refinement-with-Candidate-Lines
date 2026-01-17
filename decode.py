@@ -120,7 +120,7 @@ class SATDecoder:
 			else:
 				commands.append(input_path)
 			
-			command += arguments
+			commands += arguments
 			
 			process = subprocess.Popen(
 				commands,
@@ -306,4 +306,5 @@ class SATDecoder:
 				elif line.startswith("c New solution:"):
 					solutions.append(line[16:-2])
 		
+
 		return count, solutions
