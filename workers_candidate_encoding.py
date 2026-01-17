@@ -164,7 +164,7 @@ def process_A_solution(selected_A, template_id, candidate_line_count, point_to_B
 			exhaust_satsolver_path, 
 			input_content=encoding_secondary.to_dimacs(), 
 			arguments=["--order", str(len(possible_B_lines))],
-			display_to_console=True, 
+			display_to_console=False, 
 			on_solution_found=collect_b_solution
 		) # run exhaustive SAT solver to find all valid B configurations
 		
@@ -248,7 +248,7 @@ if __name__ == "__main__": # initial setup
 		encoding.finalize_encoding()
 		print(encoding)
 	else:
-		exhaustive_variables = [0]
+		exhaustive_variables = candidate_line_count[0]
 
 	# set up worker function with fixed arguments for parallel processing
 	worker = partial(
@@ -275,9 +275,15 @@ if __name__ == "__main__": # initial setup
 
 	current_time = time.time()
 
+	stats['raw_A_solution_count'] = 0
+
 	def on_solution_found(solution_str):
 		"""Called by run_sat_solver each time a new solution is found."""
 		solution_queue.put(solution_str.split()[:10])
+		stats['raw_A_solution_count'] += 1
+		if stats['raw_A_solution_count'] % 1000 == 1:
+			print("Raw A Solution Rate: "
+			f"(A Rate: {(stats['raw_A_solution_count']/(time.time() - current_time)):.2f}sq/s)")
 
 	def solution_processor(): # function to be run in separate thread that feeds solutions to the pool
 		"""Process solutions from queue and submit to pool."""
