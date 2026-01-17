@@ -89,7 +89,7 @@ def init_worker(A_sets_, B_sets_):
 	A_sets = A_sets_
 	B_sets = B_sets_
 
-# worker function for parallel processing of each A solution
+# worker function for parallel processing of each A solution # previously line 87
 def process_A_solution(selected_A, template_id, candidate_line_count, point_to_B, total_points, satsolver_path, exhaust_satsolver_path, script_dir):
 	"""
 	Process a single A configuration to find all valid B configurations.
@@ -114,7 +114,7 @@ def process_A_solution(selected_A, template_id, candidate_line_count, point_to_B
 				'status': 'success'
 			}
 		
-		possible_B_lines = []
+		possible_B_lines = [] # previously line 116
 		for j in range(candidate_line_count[1]):
 			allowed = True
 			for i in range(10):
@@ -123,11 +123,11 @@ def process_A_solution(selected_A, template_id, candidate_line_count, point_to_B
 					allowed = False
 					break
 			if allowed:
-				possible_B_lines.append(j)
+				possible_B_lines.append(j) # previously line 125
 		
 		if len(possible_B_lines) < 10:
 			invalidReturn['wall_time'] = float(time.time() - wall_time)
-			return invalidReturn
+			return invalidReturn # previously line 128
 		
 		# build new SAT instance for finding all valid B configurations
 		encoding_secondary = encode.SATEncoder(f"Secondary B search for A-{solution_id}", warning_bool=False, use_pipe=True)
@@ -144,7 +144,7 @@ def process_A_solution(selected_A, template_id, candidate_line_count, point_to_B
 					encoding_secondary.add_forced_cardinality_clause(b_lines, 1, 1)
 				else: # this point has no coverings, thus we cannot cover all 100 points with lines our truncated lines in B, end early 
 					invalidReturn['wall_time'] = float(time.time() - wall_time)
-					return invalidReturn
+					return invalidReturn # previously line 144
 		
 		print(len(possible_B_lines)) # I haven't seen an A refinement ever have the correct possible B lines to reach this point.
 
@@ -196,7 +196,7 @@ def process_A_solution(selected_A, template_id, candidate_line_count, point_to_B
 			'solution_id': hash(str(selected_A)) % 1000000,
 			'status': 'failed',
 			'error': str(e)
-		}
+		} # previously line 194
 
 
 def parseSolution(self: decode.SATDecoder) -> str:
@@ -211,7 +211,7 @@ def parseSolution(self: decode.SATDecoder) -> str:
 	else:
 		return f"No solution found, and so no refinement exists for template-{template_id}."
 
-if __name__ == "__main__": # initial setup
+if __name__ == "__main__": # initial setup # previously line 209
 	rewrite = False
 	
 	print("Loading candidate lines from:", candidate_lines_2_path)
@@ -389,7 +389,7 @@ if __name__ == "__main__": # initial setup
 		solution_queue.put(None) # sentinel to stop processor
 		processor_thread.join() # wait for all processing to complete
 
-		print(f"\nCompleted processing all {stats['processed_count']} A configurations.")
+		print(f"\nCompleted processing all {stats['processed_count']} A configurations.") # previously line 380
 
 		# now we write the final analysis of the results
 		results = list(results_list)
@@ -424,4 +424,5 @@ if __name__ == "__main__": # initial setup
 	else:
 		wall_time = decoding.run_sat_solver(satsolver_path, input_path, [], True)
 		print("\n" + str(decoding))
+
 
