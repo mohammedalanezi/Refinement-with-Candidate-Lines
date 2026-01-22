@@ -293,7 +293,7 @@ if __name__ == "__main__":
 					
 					summary = perf_stats.get_summary()
 					print(f"\n{'='*70}")
-					print(f"PERFORMANCE STATS (Elapsed: {summary['elapsed_time']:.1f}s); template-{template_id}")
+					print(f"PERFORMANCE STATS (Elapsed: {summary['elapsed_time']:.1f}s); template-{template_id}, results: {len(results_list)}, approx queue: {solution_queue.qsize()}")
 					print(f"{'='*70}")
 					print(f"Counts: Raw A: {summary['counts']['raw_A']} | "
 						  f"Processed A: {summary['counts']['processed_A']} | "
