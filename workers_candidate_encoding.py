@@ -191,7 +191,9 @@ def process_A_solution(selected_A, template_id, point_to_B, total_points, exhaus
 		}
 
 def parseSolution(self: decode.SATDecoder) -> str:
-	if self.get_satisfiability():
+	if self.get_satisfiability() == False or self.get_exhaustive_solutions()[0] > 0:
+		return f"No solution found, and so no refinement exists for template-{template_id}."
+	else:
 		return_string = ""
 		timings = self.get_timings()
 		count, solutions = self.get_exhaustive_solutions()
@@ -199,8 +201,6 @@ def parseSolution(self: decode.SATDecoder) -> str:
 		return_string += str(timings) + "\n"
 		return_string += str(count) + "\n"
 		return return_string
-	else:
-		return f"No solution found, and so no refinement exists for template-{template_id}."
 
 if __name__ == "__main__":
 	rewrite = False
@@ -333,7 +333,7 @@ if __name__ == "__main__":
 													stats['processed_count'] += 1
 													
 													if result['status'] == 'success':
-														if result['num_valid_Bs'] > 0 or stats['processed_count'] % 100 == 1:
+														if result['num_valid_Bs'] > 0 or True:
 															print(f"[{stats['processed_count']}/{stats['total_count'] if stats['total_count'] > 0 else '?'}] "
 																f"A-{result['solution_id']}: {result['num_valid_Bs']} valid Bs "
 																f"({result['wall_time']:.2f}s, {stats['processed_count']/(time.time() - current_time):.2f} A/s)")
