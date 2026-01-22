@@ -117,7 +117,7 @@ def process_A_solution(selected_A, template_id, point_to_B, total_points, exhaus
 				else:
 					invalidReturn['wall_time'] = float(time.time() - wall_time)
 					return invalidReturn
-
+				
 		encoding_secondary.finalize_encoding()
 
 		def parse_secondary_solution(decoder: decode.SATDecoder) -> str:
@@ -134,7 +134,7 @@ def process_A_solution(selected_A, template_id, point_to_B, total_points, exhaus
 		wall_time = decoding_secondary.run_sat_solver(
 			exhaust_satsolver_path, 
 			input_content=encoding_secondary.to_dimacs(), 
-			arguments=["--order", str(len(possible_B_lines))],
+			arguments=["--only-neg", "--order", str(len(possible_B_lines))],
 			display_to_console=False, 
 			on_solution_found=collect_b_solution
 		)
@@ -290,11 +290,11 @@ if __name__ == "__main__":
 				while not shutdown_event.is_set():
 					time.sleep(15.0)  # Update every 15 seconds
 					perf_stats.snapshot_rates()
-					
 					summary = perf_stats.get_summary()
-					print(f"\n{'='*70}")
-					print(f"PERFORMANCE STATS (Elapsed: {summary['elapsed_time']:.1f}s); template-{template_id}, results: {len(results_list)}, approx queue: {solution_queue.qsize()}")
-					print(f"{'='*70}")
+					line_length = 80
+					print(f"\n{'='*line_length}")
+					print(f"PERFORMANCE STATS (Elapsed: {summary['elapsed_time']:.1f}s); template-{template_id}")
+					print(f"{'='*line_length}")
 					print(f"Counts: Raw A: {summary['counts']['raw_A']} | "
 						  f"Processed A: {summary['counts']['processed_A']} | "
 						  f"Total B: {summary['counts']['total_B']}")
@@ -326,8 +326,8 @@ if __name__ == "__main__":
 					print(f"  B configs:   {summary['raw_rate_stats_60s']['B']['top']:.2f} / "
 						  f"{summary['raw_rate_stats_60s']['B']['avg']:.2f} / "
 						  f"{summary['raw_rate_stats_60s']['B']['bottom']:.2f} B/s")
-					print(f"{'='*70}\n")
-					
+					print(f"{'='*line_length}\n")
+						
 			stats_thread = threading.Thread(target=stats_display, daemon=True)
 			stats_thread.start()
 
@@ -342,10 +342,9 @@ if __name__ == "__main__":
 				try:
 					with multiprocessing.Pool(processes=num_proc, initializer=init_worker, initargs=(tuple(candidate_lines),tuple(candidate_line_count),)) as local_pool:
 						pending_results = []
-						
 						while not shutdown_event.is_set():
 							try:																
-								solution = solution_queue.get(timeout=1) # A refinement
+								solution = solution_queue.get(timeout=0.6) # A refinement
 								if solution is None:
 									break
 								async_result = local_pool.apply_async(worker, (solution,)) # assign processor to A refinement
@@ -363,10 +362,10 @@ if __name__ == "__main__":
 										except Exception as e:
 											print(f"Error getting result: {e}")
 											completed.append(i)
-								
+
 								for i in reversed(completed):
 									pending_results.pop(i) # remove all completed refinements from pending list
-
+									
 							except queue.Empty:
 								continue
 							except Exception as e:
@@ -402,18 +401,14 @@ if __name__ == "__main__":
 					input_path,
 					["--only-neg", "--order", str(exhaustive_variables)],
 					False,
-					on_solution_found=on_solution_found
-				)
+					on_solution_found=on_solution_found)
 				
 				count, _ = decoding.get_exhaustive_solutions()
 				print(f"\nFound {count} A configurations total. Waiting for all to be processed...")
 			finally:
 				solution_queue.put(None)
-				processor_thread.join(timeout=600)
-				if processor_thread.is_alive():
-					print("WARNING: Processor thread did not finish in time")
-					shutdown_event.set()
-					processor_thread.join(timeout=60)
+				processor_thread.join()
+				shutdown_event.set()
 
 			performance_path = os.path.join(script_dir, f"{template_id}-performance-stats.txt")
 			with open(performance_path, 'w') as f: # write final results
