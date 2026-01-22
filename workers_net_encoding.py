@@ -294,7 +294,6 @@ if __name__ == "__main__":
 					perf_stats.snapshot_rates()
 					summary = perf_stats.get_summary()
 					line_length = 80
-					current_pending = 0
 					with pending_lock:
 						current_pending = pending_count
 					print(f"\n{'='*line_length}")
@@ -346,6 +345,7 @@ if __name__ == "__main__":
 				perf_stats.record_raw_A()
 
 			def solution_processor():
+				global pending_count
 				"""Process solutions from queue and submit to pool."""
 				try:
 					with multiprocessing.Pool(processes=num_proc, initializer=init_worker, initargs=(tuple(candidate_lines),tuple(candidate_line_count),)) as local_pool:
@@ -358,6 +358,9 @@ if __name__ == "__main__":
 								async_result = local_pool.apply_async(worker, (solution,)) # assign processor to A refinement
 								pending_results.append(async_result) # add to tracking list of "currently being worked on A refinement"
 
+								with pending_lock:
+									pending_count = len(pending_results)
+									
 								completed = []
 								for i, async_res in enumerate(pending_results): # check for completed results
 									if async_res.ready(): # is "currently being worked on A refinement" done?
@@ -373,6 +376,7 @@ if __name__ == "__main__":
 
 								for i in reversed(completed):
 									pending_results.pop(i) # remove all completed refinements from pending list
+
 								with pending_lock:
 									pending_count = len(pending_results)
 
