@@ -252,7 +252,7 @@ if __name__ == "__main__":
 							encoding.add_clause([-symbols[row][col][s]])
 
 		print("Writing latin square constraints.") #  move the bulk of this to encode.py since it will be reused a lot
-		for index in range(latin_squares): # Maintain latin square clauses
+		for index in range(latin_squares): # maintain latin square clauses
 			square = [P, Q, Z][index]
 			encodeLatinSquare(encoding, square)
 					
@@ -278,26 +278,32 @@ if __name__ == "__main__":
 				script_dir=script_dir
 			)
 
-			num_proc = max(multiprocessing.cpu_count() - 2, 1) # limit number of processes to avoid resource exhaustion
+			num_proc = max(multiprocessing.cpu_count() - 1, 1) # limit number of processes to avoid resource exhaustion
 			print(f"Using {num_proc} CPU cores for parallel processing.")
 			
 			solution_queue = queue.Queue()
 			results_list = []
 			shutdown_event = threading.Event()
 
+			pending_count = 0
+			pending_lock = threading.Lock()
+
 			def stats_display():
 				"""Periodically display performance statistics."""
 				while not shutdown_event.is_set():
-					time.sleep(15.0)  # Update every 15 seconds
 					perf_stats.snapshot_rates()
 					summary = perf_stats.get_summary()
 					line_length = 80
+					current_pending = 0
+					with pending_lock:
+						current_pending = pending_count
 					print(f"\n{'='*line_length}")
 					print(f"PERFORMANCE STATS (Elapsed: {summary['elapsed_time']:.1f}s); template-{template_id}")
 					print(f"{'='*line_length}")
 					print(f"Counts: Raw A: {summary['counts']['raw_A']} | "
 						  f"Processed A: {summary['counts']['processed_A']} | "
-						  f"Total B: {summary['counts']['total_B']}")
+						  f"Total B: {summary['counts']['total_B']} | "
+						  f"Pending A: {current_pending}")
 					print(f"\nCurrent Rates (60s window):")
 					print(f"  Raw A:       {summary['current_rates']['raw_A_rate']:.2f} A/s")
 					print(f"  Processed A: {summary['current_rates']['processed_A_rate']:.2f} A/s")
@@ -327,6 +333,8 @@ if __name__ == "__main__":
 						  f"{summary['raw_rate_stats_60s']['B']['avg']:.2f} / "
 						  f"{summary['raw_rate_stats_60s']['B']['bottom']:.2f} B/s")
 					print(f"{'='*line_length}\n")
+
+					time.sleep(15.0) # update every 15 seconds
 						
 			stats_thread = threading.Thread(target=stats_display, daemon=True)
 			stats_thread.start()
@@ -343,7 +351,7 @@ if __name__ == "__main__":
 					with multiprocessing.Pool(processes=num_proc, initializer=init_worker, initargs=(tuple(candidate_lines),tuple(candidate_line_count),)) as local_pool:
 						pending_results = []
 						while not shutdown_event.is_set():
-							try:																
+							try:								
 								solution = solution_queue.get(timeout=0.6) # A refinement
 								if solution is None:
 									break
@@ -365,7 +373,9 @@ if __name__ == "__main__":
 
 								for i in reversed(completed):
 									pending_results.pop(i) # remove all completed refinements from pending list
-									
+								with pending_lock:
+									pending_count = len(pending_results)
+
 							except queue.Empty:
 								continue
 							except Exception as e:
@@ -470,14 +480,11 @@ if __name__ == "__main__":
 								f.write(f"    B{idx+1}: {b_config}\n")
 							f.write(f"    ... and {result['num_valid_Bs'] - 5} more\n")
 						f.write("\n")
-				
 				f.write(f"\nTotal valid (A, B) pairs found: {total_AB_pairs}\n")
-
 			print(f"All results written to {results_path}")
 			print(f"Total valid (A, B) pairs: {total_AB_pairs}")
 		finally: # clean up shared memory
 			print("Shared memory cleaned up")
-	
 	else: # non-exhaustive mode
 		decoding = decode.SATDecoder(output_path, parseSolution)
 		wall_time = decoding.run_sat_solver(satsolver_path, input_path, [], True)
