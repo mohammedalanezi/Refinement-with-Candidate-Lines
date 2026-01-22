@@ -1,5 +1,6 @@
 """
-SAT Instance Encoder, generates DIMACS CNF encoding file for use in SAT Solvers.
+SAT Instance Encoder
+Generates DIMACS CNF encoding file for use in SAT Solvers.
 
 By Mohammed Al-Anezi.
 """

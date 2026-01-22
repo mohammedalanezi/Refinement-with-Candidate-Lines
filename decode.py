@@ -88,7 +88,7 @@ class SATDecoder:
 				return f.readlines()
 		return []
 	
-	def run_sat_solver(self, sat_solver_path : str = None, input_path : str = None, arguments : str = [], display_to_console : bool = False, on_solution_found = None, input_content : str = None) -> float:
+	def run_sat_solver(self, sat_solver_path : str = None, input_path : str = None, arguments : str = [], display_to_console : bool = False, on_solution_found = None, input_content : str = None) -> float | None:
 		"""
 		Runs SAT instance through a specified SAT Solver with a specified Input file and outputs it to our Output file.
 		
@@ -215,7 +215,7 @@ class SATDecoder:
 		
 		return round((time.time() - wall_time) * 1000)/1000
 	
-	def get_timings(self) -> float:
+	def get_timings(self) -> dict[str, float]:
 		"""
 		Parse SAT solver output to get all the timings of the SAT instance.
 		
@@ -239,7 +239,7 @@ class SATDecoder:
 		
 		return timings
 	
-	def get_satisfiability(self) -> bool:
+	def get_satisfiability(self) -> bool | None:
 		"""
 		Parse SAT solver output to get if we have SAT or UNSAT.
 		
@@ -257,7 +257,7 @@ class SATDecoder:
 		
 		return None
 	
-	def get_variable_assignment(self, positive_only : bool = True) -> int:
+	def get_variable_assignment(self, positive_only : bool = True) -> list[int]:
 		"""
 		Parse SAT solver output and extract variable assignments.
 		We assume the output file will correctly append "v" to the front of all variable assignments.
@@ -296,7 +296,7 @@ class SATDecoder:
 			Number of solutions (int)
 			List of solutions (unsatisfied variables)
 		"""
-		count = 0
+		count = -1
 		solutions = []
 
 		with open(self.file_path, 'r') as f:
@@ -306,5 +306,4 @@ class SATDecoder:
 				elif line.startswith("c New solution:"):
 					solutions.append(line[16:-2])
 		
-
 		return count, solutions
