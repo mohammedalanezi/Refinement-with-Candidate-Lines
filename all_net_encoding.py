@@ -35,7 +35,7 @@ order = 10
 k_net = []
 mapping = {}
 variable_counts = {}
-latin_squares = 1
+latin_squares = 3
 
 def parseSolution(self: decode.SATDecoder) -> str:
 	if self.get_satisfiability() == False or self.get_exhaustive_solutions()[0] > 0:
@@ -73,45 +73,47 @@ if __name__ == "__main__":
 	for i in range(latin_squares):
 		k_net.append([])
 		addSquareVariables(k_net[-1], i)
-
+		
 	open(input_path, "w").close()
 	encoding.set_encoding_path(input_path, 10000, False)
 
-	Q = k_net[0]
+	Q, Z, P = k_net[0], k_net[1], k_net[2]
 	exhaustive_variables = variable_counts[0] #encoding.var_counter # A refinement
 
 	template = unloadTemplate(template_path)
 	print("Writing template restrictions.")
 	for par_class, lines in enumerate(template):
-		if par_class >= 1:
-			continue
+		symbols = [Q, Z][par_class]
 		for row, line in enumerate(lines):
 			for col, relational in enumerate(line):
 				if relational == 1:
 					for s in range(4,order):
-						encoding.add_clause([-Q[row][col][s]])
+						encoding.add_clause([-symbols[row][col][s]])
 				else:
 					for s in range(4):
-						encoding.add_clause([-Q[row][col][s]])
-			if row == 0:
+						encoding.add_clause([-symbols[row][col][s]])
+			if row == 1:
 				relationalCounter = 0
 				nonrelationalCounter = 4
 				for col, relational in enumerate(line):
 					if relational == 1:
-						encoding.add_clause([Q[row][col][relationalCounter]])
+						encoding.add_clause([symbols[row][col][relationalCounter]])
 						relationalCounter += 1
 					else:
-						encoding.add_clause([Q[row][col][nonrelationalCounter]])
+						encoding.add_clause([symbols[row][col][nonrelationalCounter]])
 						nonrelationalCounter += 1
 
-		print("Writing latin square constraints.") 
-		encodeLatinSquare(encoding, Q)
+	print("Writing latin square constraints.") #  move the bulk of this to encode.py since it will be reused a lot
+	for index in range(latin_squares): # maintain latin square clauses
+		square = [Q, Z, P][index]
+		encodeLatinSquare(encoding, square)
+				
+	print("Writing orthogonality constraints.")
+	encodeMyrvoldOrthogonality(encoding, P, Q, Z)
 
-		encoding.finalize_encoding()
-		print(encoding)
-	
-	#exhaustive_variables = 10 * 10 * 10 # 10 rows, 10 columns, 10 symbols 
+	encoding.finalize_encoding()
+	print(encoding)
 
 	print(f"Completed making the SAT encoding, has {exhaustive_variables} amount of variables.")
 	print(f"Must be called manually due to the sheer solution speed, recommended command:")
-	print(f"	/mnt/g/Code/sat\ solver\ stuff/cadical-exhaust-master/build/cadical-exhaust /mnt/g/Code/sat\ solver\ stuff/library/{template_id}-input-an.cnf --inprocessing=false --order 1000 > /mnt/g/Code/sat\ solver\ stuff/library/{template_id}-output-an.txt")
+	print(f"	/mnt/g/Code/sat\\ solver\\ stuff/cadical-exhaust-master/build/cadical-exhaust /mnt/g/Code/sat\\ solver\\ stuff/library/{template_id}-input-an.cnf --inprocessing=false --order 1000 > /mnt/g/Code/sat\\ solver\\ stuff/library/{template_id}-output-an.txt")
