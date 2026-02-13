@@ -2,7 +2,9 @@
 All Net Encoding by Mohammed
 
 Parallel processing version for exhaustive SAT solutions
-Finds every single possible A in valid AB pairs
+Always us to find full/partial As and/or full/partial Bs, while maintaining orthogonality between As and Bs.
+Uses modified version of CaDiCaL-exhaust developed by Dr. Curtis Bright and modified by me
+
 '''
 
 import os
@@ -144,3 +146,4 @@ if __name__ == "__main__":
 			print(f"Key: {key}, Value: {value}")
 	else:
 		print("no solution")
+
