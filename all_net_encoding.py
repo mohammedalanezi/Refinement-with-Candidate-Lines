@@ -37,6 +37,13 @@ mapping = {}
 variable_counts = {}
 latin_squares = 3
 
+observed = []
+observed_rows = order # do partial solution on these rows
+observe_A = True #Q
+observe_B = False #Z
+
+# FOR JUST PARTIAL SOLUTIONS OVER As SET observe_A = True, observe_B = False, and observed_rows = order
+
 def parseSolution(self: decode.SATDecoder) -> str:
 	if self.get_satisfiability() == False or self.get_exhaustive_solutions()[0] > 0:
 		return f"No solution found, and so no refinement exists for template-{template_id}."
@@ -54,8 +61,6 @@ def get4DIndex(index):
 	return tuple[0], tuple[1] - 1, tuple[2] - 1, tuple[3] - 1
 
 if __name__ == "__main__":
-	rewrite = True
-	
 	encoding = encode.SATEncoder("As Encoding for Template Refinement", False)
 	
 	def addSquareVariables(table : list, square : int):
@@ -92,7 +97,7 @@ if __name__ == "__main__":
 				else:
 					for s in range(4):
 						encoding.add_clause([-symbols[row][col][s]])
-			if row == 1:
+			if row == 0:
 				relationalCounter = 0
 				nonrelationalCounter = 4
 				for col, relational in enumerate(line):
@@ -102,18 +107,40 @@ if __name__ == "__main__":
 					else:
 						encoding.add_clause([symbols[row][col][nonrelationalCounter]])
 						nonrelationalCounter += 1
+			if (par_class == 0 and observe_A) or (par_class == 1 and observe_B):
+				if row < observed_rows:
+					for col in range(order):
+						for sym in range(order):
+							observed.append(symbols[row][col][sym])
+	
+	print("Writing orthogonality constraints.")
+	encodeZhangOrthogonality(encoding, P, Q, Z)
 
 	print("Writing latin square constraints.") #  move the bulk of this to encode.py since it will be reused a lot
-	for index in range(latin_squares): # maintain latin square clauses
+	for index in range(latin_squares - 1): # maintain latin square clauses
 		square = [Q, Z, P][index]
 		encodeLatinSquare(encoding, square)
-				
-	print("Writing orthogonality constraints.")
-	encodeMyrvoldOrthogonality(encoding, P, Q, Z)
 
 	encoding.finalize_encoding()
 	print(encoding)
 
-	print(f"Completed making the SAT encoding, has {exhaustive_variables} amount of variables.")
-	print(f"Must be called manually due to the sheer solution speed, recommended command:")
-	print(f"	/mnt/g/Code/sat\\ solver\\ stuff/cadical-exhaust-master/build/cadical-exhaust /mnt/g/Code/sat\\ solver\\ stuff/library/{template_id}-input-an.cnf --inprocessing=false --order 1000 > /mnt/g/Code/sat\\ solver\\ stuff/library/{template_id}-output-an.txt")
+	observed_string = " ".join(map(str, observed))
+
+	decoding = decode.SATDecoder(output_path, parseSolution)
+	print(f"Running SAT Solver on {input_path}.")
+	wall_time = decoding.run_sat_solver(
+		exhaust_satsolver_path, 
+		input_path,
+		["--order"] + observed_string.split(),
+		True,
+	)
+
+	if decoding.get_satisfiability():
+		print("Found solutions!")
+		count, _ = decoding.get_exhaustive_solutions()
+		print(f"Found {count} solutions in the sat instance.")
+		timings = decoding.get_timings()
+		for key, value in timings.items():
+			print(f"Key: {key}, Value: {value}")
+	else:
+		print("no solution")
