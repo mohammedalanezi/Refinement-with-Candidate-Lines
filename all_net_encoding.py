@@ -90,7 +90,6 @@ if __name__ == "__main__":
 	encoding.set_encoding_path(input_path, 10000, False)
 
 	Q, Z, P = k_net[0], k_net[1], k_net[2]
-	exhaustive_variables = variable_counts[0] #encoding.var_counter # A refinement
 
 	template = unloadTemplate(template_path)
 	print("Writing template restrictions.")
@@ -162,3 +161,4 @@ if __name__ == "__main__":
 			print(f"Key: {key}, Value: {value}")
 	else:
 		print("no solution")
+
