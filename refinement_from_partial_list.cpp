@@ -38,8 +38,6 @@ vector<vector<int>> parallels_A;
 vector<vector<int>> parallels_B;
 
 int largest_intersection = 0;
-static vector<int> cell_map[order * order * 10];
-static bool cell_map_initialized = false;
 
 vector<int> all_line_indices_A;
 vector<int> all_line_indices_B;
@@ -361,16 +359,10 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
         return -1;
     }
 
-    if (!cell_map_initialized) {
-        for (int i = 0; i < order * order * 2; i++) {
-            cell_map[i].reserve(largest_intersection);
-        }
-        cell_map_initialized = true;
-    }
-
-    for (int i = 0; i < order * order * 2; i++) {
-        cell_map[i].clear();
-    }
+	vector<int> cell_map[order * order * 10];
+	for (int i = 0; i < order * order * 2; i++) {
+		cell_map[i].reserve(largest_intersection);
+	}
     
     for (size_t i = 0; i < solution_A_indices.size(); i++) 
         for (int p : cand_lines_A[solution_A_indices[i]]) {
