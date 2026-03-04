@@ -12,18 +12,14 @@ from helpers import *
 import encode
 import decode
 
-timeout = 60 * 30
-
 script_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(script_dir)
-
-exhaust = True # set to True for exhaustive + parallel processing
 
 exhaust_satsolver_path = os.path.join(parent_dir, "cadical-exhaust-master", "build", "cadical-exhaust")
 satsolver_path = os.path.join(parent_dir, "kissat-rel-4.0.2", "build", "kissat")
 
 if len(sys.argv) < 5:
-	print("Usage: python3 generate.py <template_id> <symbol transversal (1-10)> <partial on A (1/0)> <partial on B (1/0)>\n")
+	print("Usage: python3 all_net_encoding.py <template_id> <symbol transversal (1-10)> <partial on A (1/0)> <partial on B (1/0)>\n")
 	sys.exit(1)
 
 template_id = int(sys.argv[1]) + 1
@@ -39,8 +35,6 @@ observe_A = int(sys.argv[3]) == 1 #Q
 observe_B = int(sys.argv[4]) == 1 #Z
 
 template_path = os.path.join(parent_dir, "refinements and candidate lines", "templates", str(template_id)+"-template.txt")
-input_path = os.path.join(script_dir, f"{template_id}-{observed_syms}-{observe_A}-{observe_B}-input.cnf")
-output_path = os.path.join(script_dir, f"{template_id}-{observed_syms}-{observe_A}-{observe_B}-output.txt")
 
 if observe_A == False and observe_B == False:
 	print("No partial MOLS observed, ensure that the partial solution contains at least one square.")
@@ -67,7 +61,14 @@ def get4DIndex(index):
 	tuple = mapping[index]
 	return tuple[0], tuple[1] - 1, tuple[2] - 1, tuple[3] - 1
 
-if __name__ == "__main__":
+def runEncoding(can_forget=False, suffix=""):
+	filename = f"{template_id}-{observed_syms}-{observe_A}-{observe_B}"
+	if suffix != "":
+		filename += f"-{suffix}"
+	input_path = os.path.join(script_dir, f"{filename}-input.cnf")
+	output_path = os.path.join(script_dir, f"{filename}-output.txt")
+	solution_path = os.path.join(script_dir, f"{filename}-solutions.txt")
+	template = unloadTemplate(template_path)
 	encoding = encode.SATEncoder("As Encoding for Template Refinement", False)
 	
 	def addSquareVariables(table : list, square : int):
@@ -87,45 +88,31 @@ if __name__ == "__main__":
 		addSquareVariables(k_net[-1], i)
 		
 	open(input_path, "w").close()
+	open(solution_path, "w").close()
 	encoding.set_encoding_path(input_path, 10000, False)
 
 	Q, Z, P = k_net[0], k_net[1], k_net[2]
 
-	template = unloadTemplate(template_path)
-	print("Writing template restrictions.")
+	print("Writing latin square constraints.")
+	for index in range(latin_squares): # maintain latin square clauses
+		square = [Q, Z, P][index]
+		encodeLatinSquareOld(encoding, square)
+
+	print("Writing orthogonality constraints.")
+	encodeMyrvoldOrthogonality(encoding, P, Q, Z)
+	
+	print("Writing symmetry breaking.")
 	for par_class, lines in enumerate(template):
 		symbols = [Q, Z][par_class]
-		for row, line in enumerate(lines):
-			for col, relational in enumerate(line):
-				if relational == 1:
-					for s in range(4,order):
-						encoding.add_clause([-symbols[row][col][s]])
-				else:
-					for s in range(4):
-						encoding.add_clause([-symbols[row][col][s]])
-			if row == 0:
-				relationalCounter = 0
-				nonrelationalCounter = 4
-				for col, relational in enumerate(line):
-					if relational == 1:
-						encoding.add_clause([symbols[row][col][relationalCounter]])
-						relationalCounter += 1
-					else:
-						encoding.add_clause([symbols[row][col][nonrelationalCounter]])
-						nonrelationalCounter += 1
-			if (par_class == 0 and observe_A) or (par_class == 1 and observe_B):
-				for col in range(order):
-					for sym in range(observed_syms):
-						observed.append(symbols[row][col][sym])
-							
-	
-	print("Writing orthogonality constraints.")
-	encodeZhangOrthogonality(encoding, P, Q, Z)
-
-	print("Writing latin square constraints.") #  move the bulk of this to encode.py since it will be reused a lot
-	for index in range(latin_squares - 1): # maintain latin square clauses
-		square = [Q, Z, P][index]
-		encodeLatinSquare(encoding, square)
+		relationalCounter = 0
+		nonrelationalCounter = 4
+		for col, relational in enumerate(lines[0]):
+			if relational == 1:
+				encoding.add_clause([symbols[0][col][relationalCounter]])
+				relationalCounter += 1
+			else:
+				encoding.add_clause([symbols[0][col][nonrelationalCounter]])
+				nonrelationalCounter += 1
 	
 	for i in range(order): # from gill encoding
 		ri = (i in range(4))
@@ -138,27 +125,59 @@ if __name__ == "__main__":
 					if (ri + rj + rs + rt) % 2 == 1:
 						encoding.add_clause([-Q[i][j][s], -Z[i][j][t]])
 
+	print("Writing template restrictions.")
+	for par_class, lines in enumerate(template):
+		symbols = [Q, Z][par_class]
+		for row, line in enumerate(lines):
+			for col, relational in enumerate(line):
+				if relational == 1:
+					for s in range(4,order):
+						encoding.add_clause([-symbols[row][col][s]])
+				else:
+					for s in range(4):
+						encoding.add_clause([-symbols[row][col][s]])
 	encoding.finalize_encoding()
 	print(encoding)
 
+	for s in range(observed_syms):
+		for r in range(order):
+			for c in range(order):
+				if observe_A:
+					observed.append(Q[r][c][s])
+				if observe_B:
+					observed.append(Z[r][c][s])	
+
 	observed_string = " ".join(map(str, observed))
+	forget = []
+
+	if can_forget:
+		forget.append("--can-forget")
 
 	decoding = decode.SATDecoder(output_path, parseSolution)
 	print(f"Running SAT Solver on {input_path}.")
 	wall_time = decoding.run_sat_solver(
 		exhaust_satsolver_path, 
 		input_path,
-		["--inprocessing=false", "--observe"] + observed_string.split(),
-		False,
+		forget + ["--solfile", solution_path, "--inprocessing=false", "--observe"] + observed_string.split(),
+		True,
 	)
 
+		# TODO: move --solfile to decode.py and maybe edit cadical-exhaust to output solfile location to console at the start
+
 	if decoding.get_satisfiability():
-		print("Found solutions!")
+		print("Found solutions, output written to", solution_path)
 		count, _ = decoding.get_exhaustive_solutions()
 		print(f"Found {count} solutions in the sat instance.")
 		timings = decoding.get_timings()
 		for key, value in timings.items():
-			print(f"Key: {key}, Value: {value}")
+			print(f"{key}: {value}")
 	else:
 		print("no solution")
+		
+if __name__ == "__main__":
+	runEncoding(True, "can_forget")
+	# TODO: maybe make a clean up helper function and run it in runEncoding when forget is True
 
+# inprocessing off is faster than inprocessing on
+# forget flag present is faster than forget flag not present, but results in more solutions (as expected)
+# 	fastest combination is with inprocessing off and can-forget on
