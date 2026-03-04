@@ -25,6 +25,8 @@
 using namespace std;
 
 // Global data structures
+const int order = 10;
+
 vector<vector<int>> cand_lines_A;
 vector<vector<int>> cand_lines_B;
 unordered_set<int> points_A;
@@ -35,13 +37,16 @@ vector<vector<int>> intersections_AB; // intersections_AB[i][j] = number of inte
 vector<vector<int>> parallels_A;
 vector<vector<int>> parallels_B;
 
+int largest_intersection = 0;
+static vector<int> cell_map[order * order * 10];
+static bool cell_map_initialized = false;
+
 vector<int> all_line_indices_A;
 vector<int> all_line_indices_B;
 
 long partial_count = 0;
 int count_A = 0;
 int count_B = 0;
-const int order = 10;
 
 struct Mask {
     uint64_t lo = 0; // bits 0–63
@@ -110,17 +115,11 @@ tuple<int,int,int,int> indexTo4Tuple(int var_index, int num_squares, int num_row
 	return {square, row, col, symbol};
 }
 
-int get1DIndex(int r, int c, int order = 10) {
+int get1DIndex(int r, int c) {
 	return r * order + c + 1;
 }
 
-void get2DCoords(int& index, int& r, int& c, int order = 10) {
-    int temp_index = index - 1;
-    r = temp_index / order;
-    c = temp_index % order;
-}
-
-pair<vector<vector<int>>, vector<vector<int>>> solutionToCandidateLines(const vector<int>& solution, int order = 10) {
+pair<vector<vector<int>>, vector<vector<int>>> solutionToCandidateLines(const vector<int>& solution) {
 	vector<vector<int>> points_by_symbol[2];
 	for (int sq = 0; sq < 2; ++sq)
 		points_by_symbol[sq].resize(order);
@@ -128,7 +127,7 @@ pair<vector<vector<int>>, vector<vector<int>>> solutionToCandidateLines(const ve
 	for (int var : solution) {
 		if (var <= 0) continue;
 		auto [sq, r, c, s] = indexTo4Tuple(var, 2, order, order, order);
-		int point = get1DIndex(r, c, order);
+		int point = get1DIndex(r, c);
 		points_by_symbol[sq][s].push_back(point);
 	}
 
@@ -164,9 +163,13 @@ void precomputeDataStructures() {
     intersections_AB.resize(cand_lines_A.size());
     for (size_t i = 0; i < cand_lines_A.size(); ++i) {
         intersections_AB[i].resize(cand_lines_B.size());
+		int one_intersections = 0;
         for (size_t j = 0; j < cand_lines_B.size(); ++j) {
             intersections_AB[i][j] = computeIntersectionCountMask(cand_masks_A[i], cand_masks_B[j]);
+			if (intersections_AB[i][j] == 1)
+				one_intersections++;
         }
+		largest_intersection = max(largest_intersection, one_intersections);
     }
 	
     parallels_A.reserve(cand_lines_A.size());
@@ -347,52 +350,55 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
     CaDiCaL::Solver solver;
     int var_cnt = 0;
 
-    vector<int> a_vars, b_vars;
+    int a_vars[largest_intersection];
+	int b_vars[largest_intersection];
     for (size_t i = 0; i < solution_A_indices.size(); i++)
-        a_vars.push_back(++var_cnt);
+        a_vars[i] = ++var_cnt;
     for (size_t i = 0; i < solution_B_indices.size(); i++)
-        b_vars.push_back(++var_cnt);
+        b_vars[i] = ++var_cnt;
 
     if (transversals.first < 0 || transversals.second < 0 || transversals.first > 10 || transversals.second > 10) {
         return -1;
     }
 
-    vector<vector<vector<int>>> map;
-	map.resize(order*2);
-    for (int r = 0; r < order*2; r++)
-        map[r].resize(order);
+    if (!cell_map_initialized) {
+        for (int i = 0; i < order * order * 2; i++) {
+            cell_map[i].reserve(largest_intersection);
+        }
+        cell_map_initialized = true;
+    }
+
+    for (int i = 0; i < order * order * 2; i++) {
+        cell_map[i].clear();
+    }
     
     for (size_t i = 0; i < solution_A_indices.size(); i++) 
         for (int p : cand_lines_A[solution_A_indices[i]]) {
-            int r,c;
-			get2DCoords(p, r, c, 10);
-            map[r][c].push_back(a_vars[i]);
+            cell_map[p - 1].push_back(a_vars[i]);
         }
     for (size_t i = 0; i < solution_B_indices.size(); i++)
         for (int p : cand_lines_B[solution_B_indices[i]]) {
-            int r, c;
-			get2DCoords(p, r, c, 10);
-            map[r + 10][c].push_back(b_vars[i]);
+            cell_map[p - 1 + order * order].push_back(b_vars[i]);
         }
 
 	for (int r = 0; r < order*2; r++)
         for (int c = 0; c < order; c++)
         {
-            if (map[r][c].size() == 0)
+            if (cell_map[r*order + c].size() == 0)
                 return -2;
 
-            for (int i = 0; i < map[r][c].size(); i++)
-                solver.add(map[r][c][i]);
+            for (int i = 0; i < cell_map[r*order + c].size(); i++)
+                solver.add(cell_map[r*order + c][i]);
             solver.add(0);
         }
 
     for (int r = 0; r < order*2; r++)
         for (int c = 0; c < order; c++)
-            for (int i = 0; i < map[r][c].size(); i++)
-                for (int j = i+1; j < map[r][c].size(); j++)
+            for (int i = 0; i < cell_map[r*order + c].size(); i++)
+                for (int j = i+1; j < cell_map[r*order + c].size(); j++)
                 {
-                    solver.add(-map[r][c][i]);
-                    solver.add(-map[r][c][j]);
+                    solver.add(-cell_map[r*order + c][i]);
+                    solver.add(-cell_map[r*order + c][j]);
                     solver.add(0);
                 }
 
@@ -403,14 +409,16 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
         for (size_t i = 0; i < a_count; i++) {
             int a_idx = solution_A_indices[i];
             int a_var = a_vars[i];
+        	const auto& intersection_row = intersections_AB[a_idx];
             
             for (size_t j = 0; j < b_count; j++) {
-                if (intersections_AB[a_idx][solution_B_indices[j]] != 1) {
-                    solver.add(-a_var);
-                    solver.add(-b_vars[j]);
-                    solver.add(0);
-                }
-            }
+				int b_idx = solution_B_indices[j]; 
+				if (intersection_row[b_idx] != 1) {
+						solver.add(-a_var);
+						solver.add(-b_vars[j]);
+						solver.add(0);
+					}
+				}
         }
     }
     
@@ -449,7 +457,7 @@ int processLine(string& line)
 	
 	auto conversion_time = chrono::steady_clock::now();
 
-	auto [A_sol_lines, B_sol_lines] = solutionToCandidateLines(solution, order);
+	auto [A_sol_lines, B_sol_lines] = solutionToCandidateLines(solution);
 	int trans_A = A_sol_lines.size();
 	int trans_B = B_sol_lines.size();
 	
