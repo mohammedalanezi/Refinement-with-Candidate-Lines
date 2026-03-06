@@ -4,7 +4,6 @@
 #include <vector>
 #include <set>
 #include <unordered_set>
-#include <unordered_map>
 #include <string>
 #include <tuple>
 #include <chrono>
@@ -14,7 +13,6 @@
 #include <cstring>
 #include <unistd.h>
 #include <fcntl.h>
-#include <map>
 
 #include <omp.h>
 #include <mutex>
@@ -23,6 +21,8 @@
 #include "exhaustive.hpp"
 
 using namespace std;
+
+#define PRINT_TIME 1
 
 // Global data structures
 const int order = 10;
@@ -275,68 +275,10 @@ vector<int> getIntersectingLineIndices(const vector<int>& line_indices, const ve
     return intersecting_indices;
 }
 
-// unused
-static void encode_exactly_min_max(CaDiCaL::Solver &solver, vector<int> &var_list, int min, int max, int &var_cnt)
-{
-	int n = var_list.size();
-	int k = max + 1;
-	int l = min;
-
-	vector<vector<int>> s;
-	for(int i = 0; i < n + 1; i++) {
-		s.push_back(vector<int>());
-		for(int j = 0; j < k + 1; j++)
-			s[i].push_back(++var_cnt);
-	}
-	
-	for(int i = 0; i < n + 1; i++) 
-	{
-		solver.add(s[i][0]);
-		solver.add(0);
-	}
-	for(int j = 1; j < k + 1; j++) 
-	{
-		solver.add(-s[0][j]);
-		solver.add(0);
-	}
-	for(int j = 1; j < l + 1; j++) 
-	{
-		solver.add(s[n][j]);
-		solver.add(0);
-	}
-	for(int i = 1; i < n + 1; i++) 
-	{
-		solver.add(-s[i][k]);
-		solver.add(0);
-	}
-
-	for(int i = 1; i < n + 1; i++) 
-	{
-		for(int j = 1; j < k + 1; j++) 
-		{
-			solver.add(-s[i - 1][j]);
-			solver.add(s[i][j]);
-			solver.add(0);
-			solver.add(-var_list[i - 1]);
-			solver.add(-s[i - 1][j - 1]);
-			solver.add(s[i][j]);
-			solver.add(0);
-			if (j <= l)
-			{
-				solver.add(-s[i][j]);
-				solver.add(s[i - 1][j]);
-				solver.add(var_list[i - 1]);
-				solver.add(0);
-				solver.add(-s[i][j]);
-				solver.add(s[i - 1][j - 1]);
-				solver.add(0);
-			}
-		}
-	}
-}
-
 int get_refinements(const pair<int,int>& transversals, const vector<int>& solution_A_indices, const vector<int>& solution_B_indices) {
-    auto start_time = chrono::steady_clock::now();
+#if PRINT_TIME == 1
+    auto timer = chrono::steady_clock::now();
+#endif
     
     vector<int> observed;
     CaDiCaL::Solver solver;
@@ -344,16 +286,13 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
     const size_t a_count = solution_A_indices.size();
     const size_t b_count = solution_B_indices.size();
 
-    const int var_cnt = a_count + b_count;
-	const bool A_larger = a_count == b_count;
-
     if (transversals.first < 0 || transversals.second < 0 || transversals.first > 10 || transversals.second > 10) {
         return -1;
     }
 
 	vector<int> cell_map[order * order * 10];
 	for (int i = 0; i < order * order * 2; i++) {
-		if(A_larger)
+		if(i < order * order)
 			cell_map[i].reserve(a_count);
 		else
 			cell_map[i].reserve(b_count);
@@ -368,26 +307,34 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
             cell_map[p - 1 + order * order].push_back(i + 1 + a_count);
         }
 
-	for (int r = 0; r < order*2; r++)
-        for (int c = 0; c < order; c++)
-        {
-            if (cell_map[r*order + c].size() == 0)
-                return -2;
+#if PRINT_TIME == 1
+    double setup_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
+	timer = chrono::steady_clock::now();
+#endif
 
-            for (int i = 0; i < cell_map[r*order + c].size(); i++)
-                solver.add(cell_map[r*order + c][i]);
-            solver.add(0);
-        }
-
-    for (int r = 0; r < order*2; r++)
-        for (int c = 0; c < order; c++)
-            for (int i = 0; i < cell_map[r*order + c].size(); i++)
-                for (int j = i+1; j < cell_map[r*order + c].size(); j++)
-                {
-                    solver.add(-cell_map[r*order + c][i]);
-                    solver.add(-cell_map[r*order + c][j]);
-                    solver.add(0);
+	const int total_cells = order * order * 2;
+	for (int idx = 0; idx < total_cells; idx++) {
+		const vector<int>& cell = cell_map[idx];
+		const int cell_size = cell.size();
+		
+		if (cell_size == 0)
+			return -2;
+		
+		solver.clause(cell); // at-least-one clause
+        
+        if(cell_size > 1) // skip single covers
+            for (int i = 0; i < cell_size; i++) { // at-most-one clauses
+                const int lit_i = cell[i];
+                for (int j = i+1; j < cell_size; j++) {
+                    solver.clause(-lit_i, -cell[j]);
                 }
+            }
+	}
+
+#if PRINT_TIME == 1
+    double covering_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
+	timer = chrono::steady_clock::now();
+#endif
 
     if(transversals.first > 0 && transversals.second > 0) {
         for (size_t i = 0; i < a_count; i++) {
@@ -398,9 +345,7 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
             for (size_t j = 0; j < b_count; j++) {
 				int b_idx = solution_B_indices[j]; 
 				if (intersection_row[b_idx] != 1) {
-						solver.add(-a_var);
-						solver.add(-(a_count + j + 1));
-						solver.add(0);
+						solver.clause(-a_var, -(a_count + j + 1));
 					}
 				}
         }
@@ -408,16 +353,19 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
     
     ExhaustiveSearch propagator(&solver, observed, true, nullptr, false);	
     
-    auto end_time = chrono::steady_clock::now();
-    double elapsed = chrono::duration<double>(end_time - start_time).count();
-
-    auto final_time = chrono::steady_clock::now();
+#if PRINT_TIME == 1
+    double intersections_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
+	timer = chrono::steady_clock::now();
+#endif
 
     int result = solver.solve();
     long int sol_count = propagator.get_solution_count();
     
-    double elapsed_2 = chrono::duration<double>(final_time - end_time).count();
-    //cout << "Encoding took " << elapsed << ", Refinement search took " << elapsed_2 << " (Total: " << (elapsed + elapsed_2) << ")\n";
+#if PRINT_TIME == 1
+    double solver_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
+    cout << "Encoding took " << (setup_elapsed + covering_elapsed + intersections_elapsed) << "; Setup took " << setup_elapsed << ", Covering took " << covering_elapsed << ", and Intersections took " << intersections_elapsed
+		<< ", Refinement search took " << solver_elapsed << " (Total: " << (setup_elapsed + covering_elapsed + intersections_elapsed + solver_elapsed) << ")\n";
+#endif
 
     return sol_count;
 }
@@ -439,38 +387,44 @@ int processLine(string& line)
 
 	++partial_count;
 	
+#if PRINT_TIME == 1
 	auto conversion_time = chrono::steady_clock::now();
+#endif 
 
 	auto [A_sol_lines, B_sol_lines] = solutionToCandidateLines(solution);
 	int trans_A = A_sol_lines.size();
 	int trans_B = B_sol_lines.size();
 	
+#if PRINT_TIME == 1
 	double elapsed_1 = chrono::duration<double>(chrono::steady_clock::now() - conversion_time).count();
-	
 	auto index_time = chrono::steady_clock::now();
+#endif
 	
 	// Convert solution lines to their candidate line indices
 	vector<int> A_sol_indices = findLineIndices(A_sol_lines, cand_lines_A);
 	vector<int> B_sol_indices = findLineIndices(B_sol_lines, cand_lines_B);
 	
+#if PRINT_TIME == 1
 	double elapsed_index = chrono::duration<double>(chrono::steady_clock::now() - index_time).count();
-	
 	auto parallel_time = chrono::steady_clock::now();
+#endif
 
 	vector<int> parallel_A_indices = getAllParallelLineIndices(A_sol_indices, cand_lines_A.size(), true);
 	vector<int> parallel_B_indices = getAllParallelLineIndices(B_sol_indices, cand_lines_B.size(), false);
 
+#if PRINT_TIME == 1
 	double elapsed_2 = chrono::duration<double>(chrono::steady_clock::now() - parallel_time).count();
-	
 	auto intersection_time = chrono::steady_clock::now();
+#endif
 
 	// Filter to those that intersect exactly once with every line of the opposite square's solution using precomputed intersections
 	vector<int> intersecting_A_indices = getIntersectingLineIndices(parallel_A_indices, B_sol_indices, 1, true);
 	vector<int> intersecting_B_indices = getIntersectingLineIndices(parallel_B_indices, A_sol_indices, 1, false);
 	
+#if PRINT_TIME == 1
 	double elapsed_3 = chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
-
-	//cout << "Conversion Time: " << elapsed_1 << ", Index Finding: " << elapsed_index << ", Parallel Time: " << elapsed_2 << ", Intersection Time: " << elapsed_3 << " (Total: " << (elapsed_1 + elapsed_index + elapsed_2 + elapsed_3) << ")" << endl;
+	cout << "Conversion Time: " << elapsed_1 << ", Index Finding: " << elapsed_index << ", Parallel Time: " << elapsed_2 << ", Intersection Time: " << elapsed_3 << " (Total: " << (elapsed_1 + elapsed_index + elapsed_2 + elapsed_3) << ")" << endl;
+#endif
 
 	long int refinement_count = get_refinements({trans_A, trans_B}, intersecting_A_indices, intersecting_B_indices);
 
