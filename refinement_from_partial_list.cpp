@@ -37,8 +37,6 @@ vector<vector<int>> intersections_AB; // intersections_AB[i][j] = number of inte
 vector<vector<int>> parallels_A;
 vector<vector<int>> parallels_B;
 
-int largest_intersection = 0;
-
 vector<int> all_line_indices_A;
 vector<int> all_line_indices_B;
 
@@ -161,13 +159,9 @@ void precomputeDataStructures() {
     intersections_AB.resize(cand_lines_A.size());
     for (size_t i = 0; i < cand_lines_A.size(); ++i) {
         intersections_AB[i].resize(cand_lines_B.size());
-		int one_intersections = 0;
         for (size_t j = 0; j < cand_lines_B.size(); ++j) {
             intersections_AB[i][j] = computeIntersectionCountMask(cand_masks_A[i], cand_masks_B[j]);
-			if (intersections_AB[i][j] == 1)
-				one_intersections++;
         }
-		largest_intersection = max(largest_intersection, one_intersections);
     }
 	
     parallels_A.reserve(cand_lines_A.size());
@@ -346,14 +340,12 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
     
     vector<int> observed;
     CaDiCaL::Solver solver;
-    int var_cnt = 0;
 
-    int a_vars[largest_intersection];
-	int b_vars[largest_intersection];
-    for (size_t i = 0; i < solution_A_indices.size(); i++)
-        a_vars[i] = ++var_cnt;
-    for (size_t i = 0; i < solution_B_indices.size(); i++)
-        b_vars[i] = ++var_cnt;
+    const size_t a_count = solution_A_indices.size();
+    const size_t b_count = solution_B_indices.size();
+
+    const int var_cnt = a_count + b_count;
+	const bool A_larger = a_count == b_count;
 
     if (transversals.first < 0 || transversals.second < 0 || transversals.first > 10 || transversals.second > 10) {
         return -1;
@@ -361,16 +353,19 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
 
 	vector<int> cell_map[order * order * 10];
 	for (int i = 0; i < order * order * 2; i++) {
-		cell_map[i].reserve(largest_intersection);
+		if(A_larger)
+			cell_map[i].reserve(a_count);
+		else
+			cell_map[i].reserve(b_count);
 	}
     
-    for (size_t i = 0; i < solution_A_indices.size(); i++) 
+    for (size_t i = 0; i < a_count; i++) 
         for (int p : cand_lines_A[solution_A_indices[i]]) {
-            cell_map[p - 1].push_back(a_vars[i]);
+            cell_map[p - 1].push_back(i + 1);
         }
-    for (size_t i = 0; i < solution_B_indices.size(); i++)
+    for (size_t i = 0; i < b_count; i++)
         for (int p : cand_lines_B[solution_B_indices[i]]) {
-            cell_map[p - 1 + order * order].push_back(b_vars[i]);
+            cell_map[p - 1 + order * order].push_back(i + 1 + a_count);
         }
 
 	for (int r = 0; r < order*2; r++)
@@ -395,19 +390,16 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
                 }
 
     if(transversals.first > 0 && transversals.second > 0) {
-        const size_t a_count = solution_A_indices.size();
-        const size_t b_count = solution_B_indices.size();
-        
         for (size_t i = 0; i < a_count; i++) {
-            int a_idx = solution_A_indices[i];
-            int a_var = a_vars[i];
+            const int a_idx = solution_A_indices[i];
+            const int a_var = i + 1;
         	const auto& intersection_row = intersections_AB[a_idx];
             
             for (size_t j = 0; j < b_count; j++) {
 				int b_idx = solution_B_indices[j]; 
 				if (intersection_row[b_idx] != 1) {
 						solver.add(-a_var);
-						solver.add(-b_vars[j]);
+						solver.add(-(a_count + j + 1));
 						solver.add(0);
 					}
 				}
