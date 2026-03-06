@@ -22,7 +22,8 @@
 
 using namespace std;
 
-#define PRINT_TIME 1
+#define PRINT_TIME 0
+#define TRACK_TIME 1
 
 // Global data structures
 const int order = 10;
@@ -43,6 +44,20 @@ vector<int> all_line_indices_B;
 long partial_count = 0;
 int count_A = 0;
 int count_B = 0;
+
+#if TRACK_TIME == 1 
+double total_sat_solving_time = 0.0; // wall time
+double total_sat_encoding_time = 0.0;
+double total_sat_covering_time = 0.0;
+double total_sat_intersection_time = 0.0;
+double total_sat_setup_time = 0.0;
+double total_sat_time = 0.0;
+
+double total_line_finding_time = 0.0;
+double total_line_parallel_time = 0.0;
+double total_line_intersection_time = 0.0;
+double total_line_time = 0.0;
+#endif
 
 struct Mask {
     uint64_t lo = 0; // bits 0–63
@@ -276,7 +291,7 @@ vector<int> getIntersectingLineIndices(const vector<int>& line_indices, const ve
 }
 
 int get_refinements(const pair<int,int>& transversals, const vector<int>& solution_A_indices, const vector<int>& solution_B_indices) {
-#if PRINT_TIME == 1
+#if TRACK_TIME == 1
     auto timer = chrono::steady_clock::now();
 #endif
     
@@ -285,6 +300,8 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
 
     const size_t a_count = solution_A_indices.size();
     const size_t b_count = solution_B_indices.size();
+
+	int var_cnt = a_count + b_count;
 
     if (transversals.first < 0 || transversals.second < 0 || transversals.first > 10 || transversals.second > 10) {
         return -1;
@@ -307,7 +324,7 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
             cell_map[p - 1 + order * order].push_back(i + 1 + a_count);
         }
 
-#if PRINT_TIME == 1
+#if TRACK_TIME == 1
     double setup_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 	timer = chrono::steady_clock::now();
 #endif
@@ -331,7 +348,7 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
             }
 	}
 
-#if PRINT_TIME == 1
+#if TRACK_TIME == 1
     double covering_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 	timer = chrono::steady_clock::now();
 #endif
@@ -353,7 +370,7 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
     
     ExhaustiveSearch propagator(&solver, observed, true, nullptr, false);	
     
-#if PRINT_TIME == 1
+#if TRACK_TIME == 1
     double intersections_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 	timer = chrono::steady_clock::now();
 #endif
@@ -361,10 +378,18 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
     int result = solver.solve();
     long int sol_count = propagator.get_solution_count();
     
-#if PRINT_TIME == 1
+#if TRACK_TIME == 1
     double solver_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
+	#if PRINT_TIME == 1
     cout << "Encoding took " << (setup_elapsed + covering_elapsed + intersections_elapsed) << "; Setup took " << setup_elapsed << ", Covering took " << covering_elapsed << ", and Intersections took " << intersections_elapsed
 		<< ", Refinement search took " << solver_elapsed << " (Total: " << (setup_elapsed + covering_elapsed + intersections_elapsed + solver_elapsed) << ")\n";
+	#endif
+	total_sat_setup_time += setup_elapsed;
+	total_sat_covering_time += covering_elapsed;
+	total_sat_intersection_time += intersections_elapsed;
+	total_sat_solving_time += solver_elapsed;
+	total_sat_encoding_time += covering_elapsed + intersections_elapsed + setup_elapsed;
+	total_sat_time += covering_elapsed + intersections_elapsed + setup_elapsed + solver_elapsed;
 #endif
 
     return sol_count;
@@ -387,7 +412,7 @@ int processLine(string& line)
 
 	++partial_count;
 	
-#if PRINT_TIME == 1
+#if TRACK_TIME == 1
 	auto conversion_time = chrono::steady_clock::now();
 #endif 
 
@@ -395,7 +420,7 @@ int processLine(string& line)
 	int trans_A = A_sol_lines.size();
 	int trans_B = B_sol_lines.size();
 	
-#if PRINT_TIME == 1
+#if TRACK_TIME == 1
 	double elapsed_1 = chrono::duration<double>(chrono::steady_clock::now() - conversion_time).count();
 	auto index_time = chrono::steady_clock::now();
 #endif
@@ -404,7 +429,7 @@ int processLine(string& line)
 	vector<int> A_sol_indices = findLineIndices(A_sol_lines, cand_lines_A);
 	vector<int> B_sol_indices = findLineIndices(B_sol_lines, cand_lines_B);
 	
-#if PRINT_TIME == 1
+#if TRACK_TIME == 1
 	double elapsed_index = chrono::duration<double>(chrono::steady_clock::now() - index_time).count();
 	auto parallel_time = chrono::steady_clock::now();
 #endif
@@ -412,7 +437,7 @@ int processLine(string& line)
 	vector<int> parallel_A_indices = getAllParallelLineIndices(A_sol_indices, cand_lines_A.size(), true);
 	vector<int> parallel_B_indices = getAllParallelLineIndices(B_sol_indices, cand_lines_B.size(), false);
 
-#if PRINT_TIME == 1
+#if TRACK_TIME == 1
 	double elapsed_2 = chrono::duration<double>(chrono::steady_clock::now() - parallel_time).count();
 	auto intersection_time = chrono::steady_clock::now();
 #endif
@@ -421,9 +446,15 @@ int processLine(string& line)
 	vector<int> intersecting_A_indices = getIntersectingLineIndices(parallel_A_indices, B_sol_indices, 1, true);
 	vector<int> intersecting_B_indices = getIntersectingLineIndices(parallel_B_indices, A_sol_indices, 1, false);
 	
-#if PRINT_TIME == 1
+#if TRACK_TIME == 1
 	double elapsed_3 = chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
+	#if PRINT_TIME == 1
 	cout << "Conversion Time: " << elapsed_1 << ", Index Finding: " << elapsed_index << ", Parallel Time: " << elapsed_2 << ", Intersection Time: " << elapsed_3 << " (Total: " << (elapsed_1 + elapsed_index + elapsed_2 + elapsed_3) << ")" << endl;
+	#endif
+	total_line_finding_time += elapsed_1;
+	total_line_parallel_time += elapsed_2;
+	total_line_intersection_time += elapsed_3;
+	total_line_time += elapsed_1 + elapsed_2 + elapsed_3;
 #endif
 
 	long int refinement_count = get_refinements({trans_A, trans_B}, intersecting_A_indices, intersecting_B_indices);
@@ -552,6 +583,21 @@ int main(int argc, char* argv[]) {
 	cout << "Time elapsed: " << elapsed << " seconds\n";
 	cout << "Throughput: " << (partial_count / elapsed) << " solutions/sec\n";
 	cout << "File: " << solution_file << endl;
+
+	#if TRACK_TIME == 1
+	cout << "\n=== TOTAL TIMES FOR THIS RUN ===\n";
+	cout << "SAT Solving: " << total_sat_solving_time << endl;
+	cout << "SAT Encoding: " << total_sat_encoding_time << endl;
+	cout << "SAT Covering: " << total_sat_covering_time << endl;
+	cout << "SAT Intersections: " << total_sat_intersection_time << endl;
+	cout << "SAT Setup: " << total_sat_setup_time << endl;
+	cout << "SAT Total: " << total_sat_time << endl;
+
+	cout << "\nLine Finding: " << total_line_finding_time << endl;
+	cout << "Line Parallel: " << total_line_parallel_time << endl;
+	cout << "Line Intersection: " << total_line_intersection_time << endl;
+	cout << "Line Total: " << total_line_time << endl;
+	#endif
 
 	return 0;
 }
