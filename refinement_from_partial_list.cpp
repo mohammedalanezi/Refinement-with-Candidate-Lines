@@ -574,9 +574,9 @@ int main(int argc, char* argv[]) {
 					#pragma omp atomic
 					total_refinements += refinement_count;
 				}
-				#pragma omp single
-        		{
-					if (partial_count % 1000 == 0) {
+				if (partial_count % 1000 == 0) {
+					#pragma omp critical(logging)
+					{
 						auto current_time = chrono::steady_clock::now();
 						double elapsed = chrono::duration<double>(current_time - start_time).count();
 						
