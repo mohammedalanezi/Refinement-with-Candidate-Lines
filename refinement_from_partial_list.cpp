@@ -65,7 +65,7 @@ struct Mask {
     }
 	
     void print() const {
-		for (int i = 127; i >= 63; --i) {
+		for (int i = 63; i >= 0; --i) {
 			std::cout << ((hi >> i) & 1);
 			if (i % 8 == 0 && i > 0) cout << " ";
 		}
@@ -75,6 +75,16 @@ struct Mask {
 		}
 		cout << endl;
     }
+	
+	bool isSet(int p) const {
+		if (p < 0 || p > 127) 
+			return false; // bounds check
+		if (p < 64) {
+			return (lo >> p) & 1ULL;
+		} else {
+			return (hi >> (p - 64)) & 1ULL;
+		}
+	}
 };
 // replace all vectors to masks (exclduing incidies)
 // replace vectors with arrays whenever possible, base it on order value
@@ -174,11 +184,12 @@ int get1DIndex(int r, int c) {
 	return r * order + c + 1;
 }
 
-pair<vector<Mask>, vector<Mask>> solutionToCandidateLines(const vector<int>& solution) {
+pair<vector<Mask>, vector<Mask>> solutionToCandidateLines(const int* solution, const int& solution_count) {
     int points_by_symbol[2][order][order];
     int counts[2][order] = {0};
 
-	for (int var : solution) {
+	for(int i = 0; i < solution_count; i++) {
+		int var = solution[i];
 		if (var <= 0) continue;
 		auto [sq, r, c, s] = indexTo4Tuple(var, 2, order, order, order);
 		int point = get1DIndex(r, c);
@@ -204,7 +215,7 @@ vector<int> findLineIndices(const vector<Mask>& solution_lines, const vector<Mas
     vector<int> indices; // converts solution lines to their candidate line indices
     indices.reserve(solution_lines.size());
     
-    for (const auto& sol_line : solution_lines) // find matching candidate line
+    for (const Mask& sol_line : solution_lines) // find matching candidate line
         for (size_t i = 0; i < candidate_masks.size(); ++i)
             if (candidate_masks[i] == sol_line) {
                 indices.push_back(i);
@@ -242,15 +253,11 @@ void precomputeDataStructures() {
 vector<int> getAllParallelLineIndices(const vector<int>& line_indices, bool is_A) {
     const auto& all		= is_A ? all_line_indices_A  : all_line_indices_B;
     const auto& masks	= is_A ? cand_masks_A		 : cand_masks_B;
-    vector<int> result;
 
-    if (line_indices.empty()) {
+    if (line_indices.empty())
         return all;
-	}
-
-    if (line_indices.size() == 10) {
+    if (line_indices.size() == 10)
         return line_indices;
-	}
 
     Mask total_incidence = masks[line_indices[0]];
 	for(int i=1; i < line_indices.size(); i++) { // get all points contained in line indices
@@ -258,20 +265,20 @@ vector<int> getAllParallelLineIndices(const vector<int>& line_indices, bool is_A
 		total_incidence.hi |= masks[line_indices[i]].hi;
 	}
 	
-    result.reserve(100); // initial known size
+    vector<int> result;
+	result.reserve(100);
     result.insert(result.end(), line_indices.begin(), line_indices.end());
 
-    for (size_t i = 0; i < masks.size(); i++) {
+    for (size_t i = 0; i < masks.size(); i++)
 		if(computeIntersectionCountMask(masks[i], total_incidence) == 0)
 			result.push_back(i);
-    }
 	
     return result;
 }
 
 vector<int> getIntersectingLineIndices(const vector<int>& line_indices, const vector<int>& opposite_indices, int intersections, bool is_A) {
     vector<int> intersecting_indices;
-    intersecting_indices.reserve(100);
+    intersecting_indices.reserve(1000);
     
     for (int line_idx : line_indices) {
         bool valid = true;
@@ -314,49 +321,38 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
 	for(int i = 0; i < transversals.second; i++)
 		solver.clause(i+1+a_count);
 
-	vector<int> cell_map[order * order * 2];
-	for (int i = 0; i < order * order * 2; i++) {
-		if(i < order * order)
-			cell_map[i].reserve(a_count);
-		else
-			cell_map[i].reserve(b_count);
-	}
-    
-    for (size_t i = 0; i < a_count; i++) {
-		Mask m = cand_masks_A[solution_A_indices[i]]; 
-        for (int x = 0; x < order; x++) {
-			int j = getLowestSetBit(m);
-			cell_map[j].push_back(i + 1);
-			clearLowestSetBit(m);
-        }
-	}
-    for (size_t i = 0; i < b_count; i++) {
-		Mask m = cand_masks_B[solution_B_indices[i]]; 
-        for (int x = 0; x < order; x++) {
-			int j = getLowestSetBit(m);
-			cell_map[j + order * order].push_back(i + 1 + a_count);
-			clearLowestSetBit(m);
-        }
-	}
-
 #if TRACK_TIME == 1
     double setup_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 	timer = chrono::steady_clock::now();
 #endif
 
-	const int total_cells = order * order * 2;
-	for (int idx = 0; idx < total_cells; idx++) {
-		const vector<int>& cell = cell_map[idx];
-		const int cell_size = cell.size();
-		
-		solver.clause(cell); // at-least-one clause
-        
-        if(cell_size > 1) // skip single covers
-            for (int i = 0; i < cell_size; i++) { // at-most-one clauses
-                const int lit_i = cell[i];
-                for (int j = i+1; j < cell_size; j++)
-                    solver.clause(-lit_i, -cell[j]);
-            }
+	if(transversals.first < order)
+		for(int i = 0; i < a_count; i++)
+			for(int j = i + 1; j < a_count; j++)
+				if(computeIntersectionCountMask(cand_masks_A[solution_A_indices[i]], cand_masks_A[solution_A_indices[j]]) > 0)
+					solver.clause(-(i + 1), -(j + 1));
+					
+	if(transversals.second < order)
+		for(int i = 0; i < b_count; i++)
+			for(int j = i + 1; j < b_count; j++)
+				if(computeIntersectionCountMask(cand_masks_B[solution_B_indices[i]], cand_masks_B[solution_B_indices[j]]) > 0)
+					solver.clause(-(i + 1 + a_count), -(j + 1 + a_count));
+    
+    for (int p = 0; p < order*order; p++) { // go through all a's, check if a has pth position true, if so solver.add(i)
+		for (size_t i = 0; i < a_count; i++) {
+			const Mask& m = cand_masks_A[solution_A_indices[i]]; 
+			if(m.isSet(p))
+				solver.add(i + 1);
+		}
+		solver.add(0);
+	}
+    for (int p = 0; p < order*order; p++) {
+		for (size_t i = 0; i < b_count; i++) {
+			const Mask& m = cand_masks_B[solution_B_indices[i]]; 
+			if(m.isSet(p))
+				solver.add(i + 1 + a_count);
+		}
+		solver.add(0);
 	}
 
 #if TRACK_TIME == 1
@@ -416,11 +412,12 @@ int processLine(string& line)
 		line.pop_back();
 	}
 	istringstream iss(line);
-	vector<int> solution(100);
+	int solution[order * order];
+	int solution_count = 0;
 	int x;
 	while (iss >> x)
 		if (x != 0) 
-			solution.push_back(x);
+			solution[solution_count++] = x;
 
 	#if ENABLE_MT == 1
 	#pragma omp atomic
@@ -434,7 +431,7 @@ int processLine(string& line)
 	auto conversion_time = chrono::steady_clock::now();
 #endif 
 
-	auto [A_sol_lines, B_sol_lines] = solutionToCandidateLines(solution);
+	auto [A_sol_lines, B_sol_lines] = solutionToCandidateLines(solution, solution_count);
 	int trans_A = A_sol_lines.size();
 	int trans_B = B_sol_lines.size();
 	
@@ -616,7 +613,7 @@ int main(int argc, char* argv[]) {
 	cout << "Line Intersection: " << total_line_intersection_time << "s" << endl;
 	cout << "Line Total: " << line_total << "s" << endl;
 
-	cout << "\nReading Time: " << elapsed - (sat_total + line_total) << "s" << endl;
+	cout << "\nMissing Time: " << elapsed - (sat_total + line_total) << "s" << endl;
 #endif
 
 #if MAX_RUNTIME > 0
