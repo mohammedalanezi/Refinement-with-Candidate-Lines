@@ -23,7 +23,7 @@
 
 #define TRACK_TIME 1
 #define PRINT_TIME 0
-#define MAX_RUNTIME 30
+#define MAX_RUNTIME 0 // a value below or equal to 0 skips timeout
 
 using namespace std;
 
@@ -34,10 +34,10 @@ unordered_set<int> points_A;
 unordered_set<int> points_B;
 unordered_set<int> total_points;
 
-vector<vector<int>> intersections_AB; // intersections_AB[i][j] = number of intersections between cand_lines_A[i] and cand_lines_B[j]
+int* intersections_AB = nullptr; // flat row-major array: intersections_AB[i * count_B + j] = number of intersections between cand_masks_A[i] and cand_masks_B[j]
 
-vector<int> all_line_indices_A;
-vector<int> all_line_indices_B;
+int* all_line_indices_A = nullptr;
+int* all_line_indices_B = nullptr;
 
 long partial_count = 0;
 int count_A = 0;
@@ -184,7 +184,7 @@ int get1DIndex(int r, int c) {
 	return r * order + c + 1;
 }
 
-pair<vector<Mask>, vector<Mask>> solutionToCandidateLines(const int* solution, const int& solution_count) {
+void solutionToCandidateLines(const int* solution, const int& solution_count, Mask a_lines[], int& a_solutions, Mask b_lines[], int& b_solutions) {
     int points_by_symbol[2][order][order];
     int counts[2][order] = {0};
 
@@ -194,55 +194,45 @@ pair<vector<Mask>, vector<Mask>> solutionToCandidateLines(const int* solution, c
 		auto [sq, r, c, s] = indexTo4Tuple(var, 2, order, order, order);
 		int point = get1DIndex(r, c);
         int &cnt = counts[sq][s];
-        if (cnt < 10) {
+        if (cnt < order) {
             points_by_symbol[sq][s][cnt++] = point;
         }
 	}
 
-	vector<Mask> A_lines, B_lines;
 	for (int sq = 0; sq < 2; ++sq)
 		for (int s = 0; s < order; ++s)
             if (counts[sq][s] == order) {
 				if (sq == 0) 
-					A_lines.push_back(make_mask(points_by_symbol[sq][s]));
+					a_lines[a_solutions++] = make_mask(points_by_symbol[sq][s]);
 				else 
-					B_lines.push_back(make_mask(points_by_symbol[sq][s]));
+					b_lines[b_solutions++] = make_mask(points_by_symbol[sq][s]);
 			}
-	return {A_lines, B_lines};
 }
 
-vector<int> findLineIndices(const vector<Mask>& solution_lines, const vector<Mask>& candidate_masks) {
-    vector<int> indices; // converts solution lines to their candidate line indices
-    indices.reserve(solution_lines.size());
-    
-    for (const Mask& sol_line : solution_lines) // find matching candidate line
-        for (size_t i = 0; i < candidate_masks.size(); ++i)
-            if (candidate_masks[i] == sol_line) {
-                indices.push_back(i);
+void findLineIndices(int solution_indices[], Mask solution_lines[], const int line_count, const vector<Mask>& candidate_masks) {
+    for (int i = 0; i < line_count; i++) // find matching candidate line
+        for (size_t j = 0; j < candidate_masks.size(); ++j)
+            if (candidate_masks[j] == solution_lines[i]) {
+                solution_indices[i] = j;
                 break;
             }
-    
-    return indices;
 }
 
 void precomputeDataStructures() {
     auto start = chrono::steady_clock::now();
     
-    intersections_AB.resize(cand_masks_A.size());
-    for (size_t i = 0; i < cand_masks_A.size(); ++i) {
-        intersections_AB[i].resize(cand_masks_B.size());
-        for (size_t j = 0; j < cand_masks_B.size(); ++j) {
-            intersections_AB[i][j] = computeIntersectionCountMask(cand_masks_A[i], cand_masks_B[j]);
-        }
-    }
+    intersections_AB = new int[count_A * count_B];
+    for (int i = 0; i < count_A; ++i)
+        for (int j = 0; j < count_B; ++j)
+            intersections_AB[i * count_B + j] = computeIntersectionCountMask(cand_masks_A[i], cand_masks_B[j]);
 
-	all_line_indices_A.reserve(cand_masks_A.size());
-	for(int i = 0; i < cand_masks_A.size(); i++)
-		all_line_indices_A.push_back(i);
-		
-	all_line_indices_B.reserve(cand_masks_B.size());
-	for(int i = 0; i < cand_masks_B.size(); i++)
-		all_line_indices_B.push_back(i);
+	all_line_indices_A = new int[count_A];
+	for(int i = 0; i < count_A; i++)
+		all_line_indices_A[i] = i;
+
+	all_line_indices_B = new int[count_B];
+	for(int i = 0; i < count_B; i++)
+		all_line_indices_B[i] = i;
     
     auto end = chrono::steady_clock::now();
     double elapsed = chrono::duration<double>(end - start).count();
@@ -250,46 +240,43 @@ void precomputeDataStructures() {
     //cout << "  A-B: " << cand_lines_A.size() << "x" << cand_lines_B.size() << " = " << (cand_lines_A.size() * cand_lines_B.size()) << " entries" << endl;
 }
 
-vector<int> getAllParallelLineIndices(const vector<int>& line_indices, bool is_A) {
-    const auto& all		= is_A ? all_line_indices_A  : all_line_indices_B;
-    const auto& masks	= is_A ? cand_masks_A		 : cand_masks_B;
+void getAllParallelLineIndices(int*& parallel_indices, int& parallel_count, const int line_indices[], const int line_count, bool is_A) {
+    int*        all      = is_A ? all_line_indices_A  : all_line_indices_B;
+    const int   all_size = is_A ? count_A             : count_B;
+    const auto& masks    = is_A ? cand_masks_A        : cand_masks_B;
 
-    if (line_indices.empty())
-        return all;
-    if (line_indices.size() == 10)
-        return line_indices;
+    if (line_count == 0) {
+        parallel_indices = all;
+        parallel_count   = all_size;
+        return;
+    }
+	
+	for(int i = 0; i < line_count; i++)
+		parallel_indices[parallel_count++] = line_indices[i];
+		
+    if (line_count == order)
+        return;
 
     Mask total_incidence = masks[line_indices[0]];
-	for(int i=1; i < line_indices.size(); i++) { // get all points contained in line indices
+	for(int i=1; i < line_count; i++) { // get all points contained in line indices
 		total_incidence.lo |= masks[line_indices[i]].lo;
 		total_incidence.hi |= masks[line_indices[i]].hi;
 	}
-	
-    vector<int> result;
-	result.reserve(100);
-    result.insert(result.end(), line_indices.begin(), line_indices.end());
 
     for (size_t i = 0; i < masks.size(); i++)
 		if(computeIntersectionCountMask(masks[i], total_incidence) == 0)
-			result.push_back(i);
-	
-    return result;
+			parallel_indices[parallel_count++] = i;
 }
 
-vector<int> getIntersectingLineIndices(const vector<int>& line_indices, const vector<int>& opposite_indices, int intersections, bool is_A) {
-    vector<int> intersecting_indices;
-    intersecting_indices.reserve(1000);
-    
-    for (int line_idx : line_indices) {
+
+void getIntersectingLineIndices(int intersecting_indices[], int& intersection_count, const int line_indices[], const int line_count, const int opposite_indices[], const int opposite_count, int intersections, bool is_A) {
+    for (int i = 0; i < line_count; i++) {
+		int line_idx = line_indices[i];
         bool valid = true;
         
-        for (int opp_idx : opposite_indices) { // VECTOR
-            int inter;
-            if (is_A) 
-                inter = intersections_AB[line_idx][opp_idx];
-            else 
-                inter = intersections_AB[opp_idx][line_idx];
-            
+        for (int j = 0; j < opposite_count; j++) { // VECTOR
+			int opp_idx = opposite_indices[j];
+            int inter = is_A ? intersections_AB[line_idx * count_B + opp_idx] : intersections_AB[opp_idx * count_B + line_idx];
             if (inter != intersections) {
                 valid = false;
                 break;
@@ -297,13 +284,11 @@ vector<int> getIntersectingLineIndices(const vector<int>& line_indices, const ve
         }
         
         if (valid) 
-            intersecting_indices.push_back(line_idx);
+            intersecting_indices[intersection_count++] = line_idx;
     }
-    
-    return intersecting_indices;
 }
 
-int get_refinements(const pair<int,int>& transversals, const vector<int>& solution_A_indices, const vector<int>& solution_B_indices) {
+int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[], const int A_count, const int B_indices[], const int B_count) {
 #if TRACK_TIME == 1
     auto timer = chrono::steady_clock::now();
 #endif
@@ -311,46 +296,43 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
     vector<int> observed;
     CaDiCaL::Solver solver;
 
-    const size_t a_count = solution_A_indices.size();
-    const size_t b_count = solution_B_indices.size();
+	int var_cnt = A_count + A_count;
 
-	int var_cnt = a_count + b_count;
-
-	for(int i = 0; i < transversals.first; i++)
+	for(int i = 0; i < trans_A; i++)
 		solver.clause(i+1);
-	for(int i = 0; i < transversals.second; i++)
-		solver.clause(i+1+a_count);
+	for(int i = 0; i < trans_B; i++)
+		solver.clause(i+1+A_count);
 
 #if TRACK_TIME == 1
     double setup_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 	timer = chrono::steady_clock::now();
 #endif
 
-	if(transversals.first < order)
-		for(int i = 0; i < a_count; i++)
-			for(int j = i + 1; j < a_count; j++)
-				if(computeIntersectionCountMask(cand_masks_A[solution_A_indices[i]], cand_masks_A[solution_A_indices[j]]) > 0)
+	if(trans_A < order)
+		for(int i = 0; i < A_count; i++)
+			for(int j = i + 1; j < A_count; j++)
+				if(computeIntersectionCountMask(cand_masks_A[A_indices[i]], cand_masks_A[A_indices[j]]) > 0)
 					solver.clause(-(i + 1), -(j + 1));
 					
-	if(transversals.second < order)
-		for(int i = 0; i < b_count; i++)
-			for(int j = i + 1; j < b_count; j++)
-				if(computeIntersectionCountMask(cand_masks_B[solution_B_indices[i]], cand_masks_B[solution_B_indices[j]]) > 0)
-					solver.clause(-(i + 1 + a_count), -(j + 1 + a_count));
+	if(trans_B < order)
+		for(int i = 0; i < B_count; i++)
+			for(int j = i + 1; j < B_count; j++)
+				if(computeIntersectionCountMask(cand_masks_B[B_indices[i]], cand_masks_B[B_indices[j]]) > 0)
+					solver.clause(-(i + 1 + A_count), -(j + 1 + A_count));
     
     for (int p = 0; p < order*order; p++) { // go through all a's, check if a has pth position true, if so solver.add(i)
-		for (size_t i = 0; i < a_count; i++) {
-			const Mask& m = cand_masks_A[solution_A_indices[i]]; 
+		for (size_t i = 0; i < A_count; i++) {
+			const Mask& m = cand_masks_A[A_indices[i]]; 
 			if(m.isSet(p))
 				solver.add(i + 1);
 		}
 		solver.add(0);
 	}
     for (int p = 0; p < order*order; p++) {
-		for (size_t i = 0; i < b_count; i++) {
-			const Mask& m = cand_masks_B[solution_B_indices[i]]; 
+		for (size_t i = 0; i < B_count; i++) {
+			const Mask& m = cand_masks_B[B_indices[i]]; 
 			if(m.isSet(p))
-				solver.add(i + 1 + a_count);
+				solver.add(i + 1 + A_count);
 		}
 		solver.add(0);
 	}
@@ -360,16 +342,16 @@ int get_refinements(const pair<int,int>& transversals, const vector<int>& soluti
 	timer = chrono::steady_clock::now();
 #endif
 
-    if(transversals.first > 0 && transversals.second > 0) {
-        for (size_t i = 0; i < a_count; i++) {
-            const int a_idx = solution_A_indices[i];
+    if(trans_A > 0 && trans_B > 0) {
+        for (size_t i = 0; i < A_count; i++) {
+            const int a_idx = A_indices[i];
             const int a_var = i + 1;
-        	const auto& intersection_row = intersections_AB[a_idx];
+        	const int* intersection_row = intersections_AB + a_idx * count_B;
             
-            for (size_t j = 0; j < b_count; j++) {
-				int b_idx = solution_B_indices[j]; 
+            for (size_t j = 0; j < B_count; j++) {
+				int b_idx = B_indices[j]; 
 				if (intersection_row[b_idx] != 1)
-					solver.clause(-a_var, -(a_count + j + 1));
+					solver.clause(-a_var, -(A_count + j + 1));
 			}
         }
     }
@@ -431,26 +413,36 @@ int processLine(string& line)
 	auto conversion_time = chrono::steady_clock::now();
 #endif 
 
-	auto [A_sol_lines, B_sol_lines] = solutionToCandidateLines(solution, solution_count);
-	int trans_A = A_sol_lines.size();
-	int trans_B = B_sol_lines.size();
-	
+	Mask A_sol_lines[order];
+	int trans_A = 0;
+	Mask B_sol_lines[order];
+	int trans_B = 0;
+
+	solutionToCandidateLines(solution, solution_count, A_sol_lines, trans_A, B_sol_lines, trans_B);
+
 #if TRACK_TIME == 1
 	double elapsed_1 = chrono::duration<double>(chrono::steady_clock::now() - conversion_time).count();
 	auto index_time = chrono::steady_clock::now();
 #endif
 	
 	// Convert solution lines to their candidate line indices
-	vector<int> A_sol_indices = findLineIndices(A_sol_lines, cand_masks_A);
-	vector<int> B_sol_indices = findLineIndices(B_sol_lines, cand_masks_B);
+	int A_sol_indices[trans_A];
+	int B_sol_indices[trans_A];
+	findLineIndices(A_sol_indices, A_sol_lines, trans_A, cand_masks_A);
+	findLineIndices(B_sol_indices, B_sol_lines, trans_B, cand_masks_B);
 
 #if TRACK_TIME == 1
 	double elapsed_index = chrono::duration<double>(chrono::steady_clock::now() - index_time).count();
 	auto parallel_time = chrono::steady_clock::now();
 #endif
 
-	vector<int> parallel_A_indices = getAllParallelLineIndices(A_sol_indices, true);
-	vector<int> parallel_B_indices = getAllParallelLineIndices(B_sol_indices, false);
+	int* parallel_A_indices = (int*)alloca(count_A * sizeof(int));
+	int  parallel_A_count = 0;
+	int* parallel_B_indices = (int*)alloca(count_B * sizeof(int));
+	int  parallel_B_count = 0;
+
+	getAllParallelLineIndices(parallel_A_indices, parallel_A_count, A_sol_indices, trans_A, true);
+	getAllParallelLineIndices(parallel_B_indices, parallel_B_count, B_sol_indices, trans_B, false);
 
 #if TRACK_TIME == 1
 	double elapsed_2 = chrono::duration<double>(chrono::steady_clock::now() - parallel_time).count();
@@ -458,8 +450,13 @@ int processLine(string& line)
 #endif
 
 	// Filter to those that intersect exactly once with every line of the opposite square's solution using precomputed intersections
-	vector<int> intersecting_A_indices = getIntersectingLineIndices(parallel_A_indices, B_sol_indices, 1, true);
-	vector<int> intersecting_B_indices = getIntersectingLineIndices(parallel_B_indices, A_sol_indices, 1, false);
+	int intersecting_A_indices[parallel_A_count];
+	int intersection_A_count = 0;
+	int intersecting_B_indices[parallel_B_count];
+	int intersection_B_count = 0;
+
+	getIntersectingLineIndices(intersecting_A_indices, intersection_A_count, parallel_A_indices, parallel_A_count, B_sol_indices, trans_B, 1, true);
+	getIntersectingLineIndices(intersecting_B_indices, intersection_B_count, parallel_B_indices, parallel_B_count, A_sol_indices, trans_A, 1, false);
 
 #if TRACK_TIME == 1
 	double elapsed_3 = chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
@@ -472,7 +469,7 @@ int processLine(string& line)
 	total_line_intersection_time += elapsed_3;
 #endif
 
-	long int refinement_count = get_refinements({trans_A, trans_B}, intersecting_A_indices, intersecting_B_indices);
+	long int refinement_count = get_refinements(trans_A, trans_B, intersecting_A_indices, intersection_A_count, intersecting_B_indices, intersection_B_count);
 
 	return refinement_count;
 }
@@ -588,7 +585,7 @@ int main(int argc, char* argv[]) {
 
 	double elapsed = chrono::duration<double>(chrono::steady_clock::now() - start_time).count();
 	
-	cout << "=== FINAL RESULTS FOR TEMPLATE " << template_id << " ===\n";
+	cout << "=== FINAL RESULTS FOR TEMPLATE " << template_id - 1 << " ===\n";
 	cout << "Total refinements found: " << total_refinements << endl;
 	cout << "Partial solutions processed: " << partial_count << endl;
 	cout << "Time elapsed: " << elapsed << " seconds\n";
