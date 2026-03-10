@@ -35,7 +35,6 @@ unordered_set<int> points_B;
 unordered_set<int> total_points;
 
 int* intersections_AB = nullptr; // flat row-major array: intersections_AB[i * count_B + j] = number of intersections between cand_masks_A[i] and cand_masks_B[j]
-
 int* all_line_indices_A = nullptr;
 int* all_line_indices_B = nullptr;
 
@@ -427,7 +426,7 @@ int processLine(string& line)
 	
 	// Convert solution lines to their candidate line indices
 	int A_sol_indices[trans_A];
-	int B_sol_indices[trans_A];
+	int B_sol_indices[trans_B];
 	findLineIndices(A_sol_indices, A_sol_lines, trans_A, cand_masks_A);
 	findLineIndices(B_sol_indices, B_sol_lines, trans_B, cand_masks_B);
 
