@@ -34,7 +34,10 @@ unordered_set<int> points_A;
 unordered_set<int> points_B;
 unordered_set<int> total_points;
 
-int* intersections_AB = nullptr; // flat row-major array: intersections_AB[i * count_B + j] = number of intersections between cand_masks_A[i] and cand_masks_B[j]
+uint64_t* intersects_once_AB = nullptr; // bitset table intersects_once_AB[j * rows_A + w]: bit i set iff intersections_AB[i*count_B+j] == 1
+uint64_t* intersects_once_BA = nullptr;
+int rows_A = 0; // ceil(count_A / 64)
+int rows_B = 0;
 int* all_line_indices_A = nullptr;
 int* all_line_indices_B = nullptr;
 
@@ -100,6 +103,11 @@ unordered_map<Mask, int, MaskHash> cand_hash_B;
 vector<Mask> cand_masks_A;
 vector<Mask> cand_masks_B;
 
+/**
+ * @brief Constructs a 128-bit Mask from a list of point indices (only 100 bits are used).
+ * @param line A vector of point values in the range [1, 100]. Each value is converted to a 0-based bit index and set in the mask.
+ * @returns A Mask with bits set at each position corresponding to a point in line.
+ */
 Mask make_mask(const vector<int>& line) {
     Mask m;
     for (int x : line) {
@@ -112,6 +120,11 @@ Mask make_mask(const vector<int>& line) {
     return m;
 }
 
+/**
+ * @brief Constructs a 128-bit Mask from a fixed-length array of point indices (only 100 bits are used).
+ * @param line A raw array of exactly `order` point values in the range [1, 100]. Each value is converted to a 0-based bit index and set in the mask.
+ * @returns A Mask with bits set at each position corresponding to a point in line.
+ */
 Mask make_mask(const int* line) {
     Mask m;
 	for(int i = 0; i < order; i++) {
@@ -125,26 +138,24 @@ Mask make_mask(const int* line) {
     return m;
 }
 
-int computeIntersectionCountMask(const Mask& m1, const Mask& m2) { // compute intersection count between two masks
+/**
+ * @brief Counts the number of points shared between two Masks.
+ * Uses hardware popcount on the bitwise AND of both halves of the masks, gives the number of bits set in both.
+ * @param m1 The first mask.
+ * @param m2 The second mask.
+ * @returns The number of points present in both m1 and m2.
+ */
+int computeIntersectionCountMask(const Mask& m1, const Mask& m2) {
     return __builtin_popcountll(m1.lo & m2.lo) + __builtin_popcountll(m1.hi & m2.hi);
 }
 
-int getLowestSetBit(const Mask& m)
-{
-	if(m.lo > 0)
-		return __builtin_ctzll(m.lo);
-	else
-		return __builtin_ctzll(m.hi) + 64;
-}
-
-void clearLowestSetBit(Mask& m)
-{
-	if(m.lo > 0)
-		m.lo &= m.lo - 1;
-	else
-		m.hi &= m.hi - 1;
-}
-
+/**
+ * @brief Parses a space-separated list of integers from a prefixed text line.
+ * Returns an empty vector if the line is empty or does not begin with the expected prefix character. The prefix and the character immediately after it (assumed to be a space) are stripped before parsing.
+ * @param line   The raw text line to parse.
+ * @param prefix The expected first character of the line ('R' or 'N').
+ * @returns A vector of integers parsed from the remainder of the line, or an empty vector if the line does not match the prefix.
+ */
 vector<int> parse_line(const string& line, char prefix) {
 	vector<int> result;
 	if (line.empty() || line[0] != prefix) 
@@ -156,6 +167,12 @@ vector<int> parse_line(const string& line, char prefix) {
 	return result;
 }
 
+/**
+ * @brief Loads candidate lines from a text file and converts them to Masks.
+ * Each line in the file beginning with 'R' or 'N' is parsed as a list of point indices and converted to a Mask. All points encountered across all lines are collected into a set.
+ * @param path Path to the candidate lines file.
+ * @returns A tuple of: the vector of Masks, the set of all points seen, and the total number of lines loaded.
+ */
 tuple<vector<Mask>, unordered_set<int>, int> load_candidate_lines_file(const string& path) {
 	ifstream f(path);
 	vector<Mask> lines;
@@ -176,6 +193,16 @@ tuple<vector<Mask>, unordered_set<int>, int> load_candidate_lines_file(const str
 	return {lines, points, (int)lines.size()};
 }
 
+/**
+ * @brief Reverses a SAT variable encoding into (square, row, col, symbol) tuple.
+ * SAT variables are assigned in row-major order across two squares, with the innermost dimension being symbol.
+ * @param var_index   1-based SAT variable index.
+ * @param num_squares Number of squares.
+ * @param num_rows    Number of rows per square.
+ * @param num_cols    Number of columns per square.
+ * @param num_symbols Number of symbols per square.
+ * @returns A tuple of (square, row, col, symbol), all 0-based.
+ */
 tuple<int,int,int,int> indexTo4Tuple(int var_index, int num_squares, int num_rows, int num_cols, int num_symbols) {
 	int vars_per_square = num_rows * num_cols * num_symbols;
 	int adjusted = var_index - 1;
@@ -188,10 +215,28 @@ tuple<int,int,int,int> indexTo4Tuple(int var_index, int num_squares, int num_row
 	return {square, row, col, symbol};
 }
 
+/**
+ * @brief Converts a (row, col) grid position to a 1-based flat point index.
+ * Points are numbered left-to-right, top-to-bottom starting from 1, matching the convention used in the candidate lines files.
+ * @param r 0-based row index.
+ * @param c 0-based column index.
+ * @returns The 1-based point index at position (r, c).
+ */
 int get1DIndex(int r, int c) {
 	return r * order + c + 1;
 }
 
+/**
+ * @brief Extracts the symbol-lines from a partial SAT solution for both squares.
+ * A symbol-line is the set of `order` grid points assigned to a single symbol within one square. 
+ * For each symbol in each square, if all `order` assignments are present in the solution, the corresponding line is added as a Mask, otherwise line is skipped.
+ * @param solution        Array of positive SAT literals representing the solution.
+ * @param solution_count  Number of literals in the solution array.
+ * @param a_lines         Output array to write Masks for square A lines into.
+ * @param a_solutions     Running count of lines written to a_lines (modified in place).
+ * @param b_lines         Output array to write Masks for square B lines into.
+ * @param b_solutions     Running count of lines written to b_lines (modified in place).
+ */
 void solutionToCandidateLines(const int* solution, const int& solution_count, Mask a_lines[], int& a_solutions, Mask b_lines[], int& b_solutions) {
     int points_by_symbol[2][order][order];
     int counts[2][order] = {0};
@@ -217,18 +262,39 @@ void solutionToCandidateLines(const int* solution, const int& solution_count, Ma
 			}
 }
 
+/**
+ * @brief Precomputes all data structures needed for fast per-solution filtering.
+ *
+ * Builds two bitset tables encoding pairwise intersection counts between candidate lines in squares A and B:
+ * 
+ *  - intersects_once_AB[j * words_A + w]: bit i is set iff A line i intersects B line j exactly once.
+ * 
+ *  - intersects_once_BA[i * words_B + w]: bit j is set iff B line j intersects A line i exactly once.
+ *
+ * With \~14k lines per side these tables are \~24MB each and fit in L3 cache, making bitwise AND across all candidates far faster than per-pair lookups.
+ *
+ * Also initialises all_line_indices_A/B (identity index arrays used as the default candidate set) and cand_hash_A/B (Mask-to-index lookup maps).
+ */
 void precomputeDataStructures() {
     auto start = chrono::steady_clock::now();
     
-    intersections_AB = new int[count_A * count_B];
+    rows_A = (count_A + 63) / 64;
+    rows_B = (count_B + 63) / 64;
+    intersects_once_AB = new uint64_t[(long long)count_B * rows_A](); // intersects_once_AB[j * rows_A + w]: bit i set iff A line i intersects B line j exactly once.
+    intersects_once_BA = new uint64_t[(long long)count_A * rows_B]();
+
     for (int i = 0; i < count_A; ++i)
-        for (int j = 0; j < count_B; ++j)
-            intersections_AB[i * count_B + j] = computeIntersectionCountMask(cand_masks_A[i], cand_masks_B[j]);
+        for (int j = 0; j < count_B; ++j) {
+            int v = computeIntersectionCountMask(cand_masks_A[i], cand_masks_B[j]);
+            if (v == 1) {
+                intersects_once_AB[(long long)j * rows_A + i / 64] |= (1ULL << (i % 64));
+                intersects_once_BA[(long long)i * rows_B + j / 64] |= (1ULL << (j % 64));
+            }
+        }
 
 	all_line_indices_A = new int[count_A];
 	for(int i = 0; i < count_A; i++)
 		all_line_indices_A[i] = i;
-
 	all_line_indices_B = new int[count_B];
 	for(int i = 0; i < count_B; i++)
 		all_line_indices_B[i] = i;
@@ -236,7 +302,6 @@ void precomputeDataStructures() {
 	cand_hash_A.reserve(count_A);
 	for (int i = 0; i < count_A; ++i)
 		cand_hash_A[cand_masks_A[i]] = i;
-
 	cand_hash_B.reserve(count_B);
 	for (int i = 0; i < count_B; ++i)
 		cand_hash_B[cand_masks_B[i]] = i;
@@ -247,6 +312,23 @@ void precomputeDataStructures() {
     //cout << "  A-B: " << cand_lines_A.size() << "x" << cand_lines_B.size() << " = " << (cand_lines_A.size() * cand_lines_B.size()) << " entries" << endl;
 }
 
+/**
+ * @brief Finds all candidate lines that share no points with a given set of lines.
+ *
+ * Parallel means having zero intersection with every line in the input set, i.e. the candidate occupies a completely disjoint set of points. The solution lines themselves are always included in the output regardless.
+ *
+ * Special cases:
+ * 
+ *   - If line_count == 0, returns the full candidate list (no constraint).
+ * 
+ *   - If line_count == order, the solution is complete; only the solution lines themselves are returned (nothing can be parallel to a full covering).
+ *
+ * @param parallel_indices Output array to write the result indices into. Must be pre-allocated to at least count_A or count_B.
+ * @param parallel_count   Running count of indices written (modified in place).
+ * @param line_indices     Indices of the solution lines to test parallelism against.
+ * @param line_count       Number of solution lines provided.
+ * @param is_A             If true, operates on square A candidates; otherwise square B.
+ */
 void getAllParallelLineIndices(int*& parallel_indices, int& parallel_count, const int line_indices[], const int line_count, bool is_A) {
     int*        all      = is_A ? all_line_indices_A  : all_line_indices_B;
     const int   all_size = is_A ? count_A             : count_B;
@@ -275,26 +357,69 @@ void getAllParallelLineIndices(int*& parallel_indices, int& parallel_count, cons
 			parallel_indices[parallel_count++] = i;
 }
 
+/**
+ * @brief Filters candidate lines to those intersecting every opposite line exactly once.
+ *
+ * Uses precomputed bitset tables for efficiency. Each opposite line has a precomputed bitset row where bit i indicates that candidate line i satisfies
+ * the intersection count constraint against that opposite line. AND over all opposite rows together yields a single bitset where bit i is set iff
+ * candidate i satisfies the constraint against every opposite simultaneously.
+ *
+ * Complexity is O(opposite_count * words + line_count) bitwise operations.
+ *
+ * @param intersecting_indices Output array for indices that pass the filter. Must be pre-allocated to at least line_count.
+ * @param intersection_count   Running count of indices written (modified in place).
+ * @param line_indices         Candidate line indices to test (e.g. from getAllParallelLineIndices).
+ * @param line_count           Number of candidate lines to test.
+ * @param opposite_indices     Indices of the opposite square's solution lines.
+ * @param opposite_count       Number of opposite solution lines.
+ * @param is_A                 If true, line_indices are A lines tested against B opposites; otherwise B lines tested against A opposites.
+ */
+void getIntersectingLineIndices(int intersecting_indices[], int& intersection_count, const int line_indices[], const int line_count, const int opposite_indices[], const int opposite_count, bool is_A) {
+    const int    words       	 = is_A ? rows_A 			 : rows_B;
+    const uint64_t* bitset_table = is_A ? intersects_once_AB : intersects_once_BA;
 
-void getIntersectingLineIndices(int intersecting_indices[], int& intersection_count, const int line_indices[], const int line_count, const int opposite_indices[], const int opposite_count, int intersections, bool is_A) {
-    for (int i = 0; i < line_count; i++) {
-		int line_idx = line_indices[i];
-        bool valid = true;
-        
-        for (int j = 0; j < opposite_count; j++) { // VECTOR
-			int opp_idx = opposite_indices[j];
-            int inter = is_A ? intersections_AB[line_idx * count_B + opp_idx] : intersections_AB[opp_idx * count_B + line_idx];
-            if (inter != intersections) {
-                valid = false;
-                break;
-            }
+    uint64_t* result = (uint64_t*)alloca(words * sizeof(uint64_t));
+
+    if (opposite_count == 0)
+        memset(result, 0xFF, words * sizeof(uint64_t));
+    else {
+        memcpy(result, bitset_table + (long long)opposite_indices[0] * words, words * sizeof(uint64_t));
+        for (int j = 1; j < opposite_count; j++) {
+            const uint64_t* row = bitset_table + (long long)opposite_indices[j] * words;
+            for (int w = 0; w < words; w++)
+                result[w] &= row[w];
         }
-        
-        if (valid) 
-            intersecting_indices[intersection_count++] = line_idx;
+    }
+
+    for (int i = 0; i < line_count; i++) {
+        const int idx = line_indices[i];
+        if ((result[idx / 64] >> (idx % 64)) & 1)
+            intersecting_indices[intersection_count++] = idx;
     }
 }
 
+/**
+ * @brief Counts valid refinements using exhaustive SAT solving.
+ *
+ * Encodes the candidate lines for both squares as a SAT problem and uses an exhaustive search propagator to count all satisfying assignments. Each
+ * solution corresponds to a pair of complete transversals (one from square A, one from square B) that together form a valid refinement.
+ *
+ * The SAT encoding imposes three constraints:
+ * 
+ *   1. Covering: every grid point must be covered by at least one chosen line in each square (unit clauses per point).
+ * 
+ *   2. Non-overlap: no two chosen lines within the same square may share a point (pairwise exclusion clauses, skipped when the square is already fully determined by the solution).
+ *
+ *   3. Cross-intersection: each chosen A line must intersect each chosen B line exactly once (pairwise exclusion clauses for non-unit intersections).
+ *
+ * @param trans_A   Number of A lines already determined by the partial solution.
+ * @param trans_B   Number of B lines already determined by the partial solution.
+ * @param A_indices Candidate A line indices that passed parallel + intersection filtering.
+ * @param A_count   Number of candidate A lines.
+ * @param B_indices Candidate B line indices that passed parallel + intersection filtering.
+ * @param B_count   Number of candidate B lines.
+ * @returns The total number of valid refinements found.
+ */
 int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[], const int A_count, const int B_indices[], const int B_count) {
 #if TRACK_TIME == 1
     auto timer = chrono::steady_clock::now();
@@ -353,13 +478,9 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
         for (size_t i = 0; i < A_count; i++) {
             const int a_idx = A_indices[i];
             const int a_var = i + 1;
-        	const int* intersection_row = intersections_AB + a_idx * count_B;
-            
-            for (size_t j = 0; j < B_count; j++) {
-				int b_idx = B_indices[j]; 
-				if (intersection_row[b_idx] != 1)
-					solver.clause(-a_var, -(A_count + j + 1));
-			}
+        	for (size_t j = 0; j < B_count; j++) 
+                if (computeIntersectionCountMask(cand_masks_A[a_idx], cand_masks_B[B_indices[j]]) != 1)
+                    solver.clause(-a_var, -(A_count + j + 1));
         }
     }
     
@@ -389,7 +510,23 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
     return sol_count;
 }
 
-// Modified to work with indices
+/**
+ * @brief Processes a single partial solution line and counts its refinements.
+ *
+ * Parses the SAT literal string, extracts the symbol-lines determined by the partial solution, then runs a three-stage filtering pipeline to find
+ * candidate lines for each square that could complete a valid refinement:
+ * 
+ *   1. solutionToCandidateLines: extract solution lines as Masks and look up their indices in the candidate hash maps.
+ * 
+ *   2. getAllParallelLineIndices: keep only candidates sharing no points with the same square's solution lines.
+ * 
+ *   3. getIntersectingLineIndices: keep only candidates intersecting each of the opposite square's solution lines exactly once.
+ *
+ * The surviving candidates are passed to get_refinements for SAT-based counting.
+ *
+ * @param line A space-separated string of non-zero SAT literals representing a partial solution. A trailing '0' is stripped if present.
+ * @returns The number of valid refinements found for this partial solution, or 0 if the line is empty or yields no valid candidates.
+ */
 int processLine(string& line)
 {
 #if TRACK_TIME == 1
@@ -464,8 +601,8 @@ int processLine(string& line)
 	int intersecting_B_indices[parallel_B_count];
 	int intersection_B_count = 0;
 
-	getIntersectingLineIndices(intersecting_A_indices, intersection_A_count, parallel_A_indices, parallel_A_count, B_sol_indices, trans_B, 1, true);
-	getIntersectingLineIndices(intersecting_B_indices, intersection_B_count, parallel_B_indices, parallel_B_count, A_sol_indices, trans_A, 1, false);
+	getIntersectingLineIndices(intersecting_A_indices, intersection_A_count, parallel_A_indices, parallel_A_count, B_sol_indices, trans_B, true);
+	getIntersectingLineIndices(intersecting_B_indices, intersection_B_count, parallel_B_indices, parallel_B_count, A_sol_indices, trans_A, false);
 
 #if TRACK_TIME == 1
 	double elapsed_3 = chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
