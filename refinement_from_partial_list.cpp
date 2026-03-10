@@ -85,8 +85,17 @@ struct Mask {
 		}
 	}
 };
-// replace all vectors to masks (exclduing incidies)
-// replace vectors with arrays whenever possible, base it on order value
+
+struct MaskHash {
+    size_t operator()(const Mask& m) const {
+        size_t h = m.lo;
+        h ^= m.hi + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2); // we combine lo and hi with a good mixing step
+        return h;
+    }
+};
+
+unordered_map<Mask, int, MaskHash> cand_hash_A;
+unordered_map<Mask, int, MaskHash> cand_hash_B;
 
 vector<Mask> cand_masks_A;
 vector<Mask> cand_masks_B;
@@ -208,15 +217,6 @@ void solutionToCandidateLines(const int* solution, const int& solution_count, Ma
 			}
 }
 
-void findLineIndices(int solution_indices[], Mask solution_lines[], const int line_count, const vector<Mask>& candidate_masks) {
-    for (int i = 0; i < line_count; i++) // find matching candidate line
-        for (size_t j = 0; j < candidate_masks.size(); ++j)
-            if (candidate_masks[j] == solution_lines[i]) {
-                solution_indices[i] = j;
-                break;
-            }
-}
-
 void precomputeDataStructures() {
     auto start = chrono::steady_clock::now();
     
@@ -232,6 +232,14 @@ void precomputeDataStructures() {
 	all_line_indices_B = new int[count_B];
 	for(int i = 0; i < count_B; i++)
 		all_line_indices_B[i] = i;
+
+	cand_hash_A.reserve(count_A);
+	for (int i = 0; i < count_A; ++i)
+		cand_hash_A[cand_masks_A[i]] = i;
+
+	cand_hash_B.reserve(count_B);
+	for (int i = 0; i < count_B; ++i)
+		cand_hash_B[cand_masks_B[i]] = i;
     
     auto end = chrono::steady_clock::now();
     double elapsed = chrono::duration<double>(end - start).count();
@@ -427,8 +435,10 @@ int processLine(string& line)
 	// Convert solution lines to their candidate line indices
 	int A_sol_indices[trans_A];
 	int B_sol_indices[trans_B];
-	findLineIndices(A_sol_indices, A_sol_lines, trans_A, cand_masks_A);
-	findLineIndices(B_sol_indices, B_sol_lines, trans_B, cand_masks_B);
+	for (int i = 0; i < trans_A; i++)
+		A_sol_indices[i] = cand_hash_A[A_sol_lines[i]];
+	for (int i = 0; i < trans_B; i++)
+		B_sol_indices[i] = cand_hash_B[B_sol_lines[i]];
 
 #if TRACK_TIME == 1
 	double elapsed_index = chrono::duration<double>(chrono::steady_clock::now() - index_time).count();
