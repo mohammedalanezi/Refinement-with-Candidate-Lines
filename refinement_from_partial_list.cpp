@@ -43,6 +43,7 @@ int rows_B = 0;
 int* all_line_indices_A = nullptr;
 int* all_line_indices_B = nullptr;
 
+long skipped_partial_solutions = 0;
 long partial_count = 0;
 int count_A = 0;
 int count_B = 0;
@@ -69,6 +70,10 @@ struct Mask {
 	
     bool operator==(const Mask& other) const {
         return (lo == other.lo && hi == other.hi);
+    }
+	
+    bool operator!=(const Mask& other) const {
+    	return !(*this == other);
     }
 	
     void print() const {
@@ -107,6 +112,8 @@ unordered_map<Mask, int, MaskHash> cand_hash_B;
 
 vector<Mask> cand_masks_A;
 vector<Mask> cand_masks_B;
+
+Mask all_points_mask;
 
 /**
  * @brief Constructs a 128-bit Mask from a list of point indices (only 100 bits are used).
@@ -152,6 +159,16 @@ Mask make_mask(const int* line) {
  */
 int computeIntersectionCountMask(const Mask& m1, const Mask& m2) {
     return __builtin_popcountll(m1.lo & m2.lo) + __builtin_popcountll(m1.hi & m2.hi);
+}
+
+/**
+ * @brief Counts the number of points in a Masks.
+ * Uses hardware popcount.
+ * @param m The mask.
+ * @returns The number of points present in m.
+ */
+int countMask(const Mask& m) {
+    return __builtin_popcountll(m.lo) + __builtin_popcountll(m.hi);
 }
 
 /**
@@ -293,6 +310,9 @@ void solutionToCandidateLines(const int* solution, const int& solution_count, Ma
  */
 void precomputeDataStructures() {
     auto start = chrono::steady_clock::now();
+
+	all_points_mask.lo = ~0ULL; // not of 0, sets bits in all 64 spots 
+	all_points_mask.hi = (1ULL << 36) - 1;
     
     rows_A = (count_A + 63) / 64;
     rows_B = (count_B + 63) / 64;
@@ -461,6 +481,29 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
 #endif
     
     CaDiCaL::Solver solver;
+	//solver.resize(A_count + B_count); // experimental: for 3.0
+
+	if (trans_A < order)
+	{
+		Mask total_incidence_A = cand_masks_A[A_indices[0]];
+		for(int i=1; i < A_count; i++) { // get all points contained in line indices
+			total_incidence_A.lo |= cand_masks_A[A_indices[i]].lo;
+			total_incidence_A.hi |= cand_masks_A[A_indices[i]].hi;
+		} 
+		if(total_incidence_A != all_points_mask) // return immedately if not covering all points
+			return -1;
+	}
+
+	if (trans_B < order)
+	{
+		Mask total_incidence_B = cand_masks_B[B_indices[0]];
+		for(int i=1; i < B_count; i++) {
+			total_incidence_B.lo |= cand_masks_B[B_indices[i]].lo;
+			total_incidence_B.hi |= cand_masks_B[B_indices[i]].hi;
+		} 
+		if(total_incidence_B != all_points_mask)
+			return -1;
+	}
 
 	for(int i = 0; i < trans_A; i++)
 		solver.clause(i+1);
@@ -489,7 +532,7 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
     double atmost_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 	timer = chrono::steady_clock::now();
 #endif
- 
+
     {
 		// stack-allocated flat buffer of (point, var) pairs: one entry per set bit across all filtered candidates.
         int* buf_point = (int*)alloca(A_count * order * sizeof(int));
@@ -785,6 +828,8 @@ int main(int argc, char* argv[]) {
 					long int refinement_count = processLine(line); 
 					if(refinement_count > 0)
 						total_refinements += refinement_count;
+					else if(refinement_count < 0)
+						skipped_partial_solutions += 1;
 					if (partial_count % 1000 == 0) {
 						auto current_time = chrono::steady_clock::now();
 						double elapsed = chrono::duration<double>(current_time - start_time).count();
@@ -809,7 +854,7 @@ int main(int argc, char* argv[]) {
 		sol_stream.close();
 		seen = unordered_set<string>();
 		
-		cout << "Loaded " << all_solution_lines.size() << " solutions to process.\n";
+		cout << "Loaded " << all_solution_lines.size() << " solutions to process.\n"; // show add a timer for this to display how long this took
 		
 		atomic<bool> abort_early(false);
 
@@ -828,6 +873,10 @@ int main(int argc, char* argv[]) {
 				if (refinement_count > 0) {
 					#pragma omp atomic
 					total_refinements += refinement_count;
+				}
+				else if(refinement_count < 0) {
+					#pragma omp atomic
+					skipped_partial_solutions += 1;
 				}
 				if (partial_count % 1000 == 0) {
 					#pragma omp critical(logging)
@@ -848,7 +897,7 @@ int main(int argc, char* argv[]) {
 	
 	cout << "=== FINAL RESULTS FOR TEMPLATE " << template_id - 1 << " ===\n";
 	cout << "Total refinements found: " << total_refinements << endl;
-	cout << "Partial solutions processed: " << partial_count << endl;
+	cout << "Partial solutions processed: " << partial_count << "(" << skipped_partial_solutions << " skipped)" << endl;
 	cout << "Time elapsed: " << elapsed << " seconds\n";
 	cout << "Throughput: " << (partial_count / elapsed) << " solutions/sec\n";
 	cout << "File: " << solution_file << endl;
