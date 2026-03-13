@@ -30,6 +30,8 @@ using namespace std;
 // Global data structures
 const int order = 10;
 
+const vector<int> observed;
+
 unordered_set<int> points_A;
 unordered_set<int> points_B;
 unordered_set<int> total_points;
@@ -45,10 +47,13 @@ long partial_count = 0;
 int count_A = 0;
 int count_B = 0;
 
-#if TRACK_TIME == 1 // tracking probably doesn't work the best when we are multithreading, TODO: fix that
+uint64_t* overlaps_AA = nullptr;
+uint64_t* overlaps_BB = nullptr;
+
+#if TRACK_TIME == 1 // This tracking probably doesn't work the best when we are multithreading, TODO: fix that
 double total_sat_solving_time = 0.0; // wall time
-double total_sat_encoding_time = 0.0;
-double total_sat_covering_time = 0.0;
+double total_sat_atmost1_time = 0.0;
+double total_sat_atleast1_time = 0.0;
 double total_sat_intersection_time = 0.0;
 double total_sat_setup_time = 0.0;
 
@@ -263,17 +268,28 @@ void solutionToCandidateLines(const int* solution, const int& solution_count, Ma
 }
 
 /**
- * @brief Precomputes all data structures needed for fast per-solution filtering.
+ * @brief Precomputes all data structures needed for fast per-solution filtering and SAT encoding.
  *
- * Builds two bitset tables encoding pairwise intersection counts between candidate lines in squares A and B:
+ * Builds four bitset tables, all in flat row-major layout where each row is a bitset over the lines of one square packed into 64-bit words:
+ *
+ *  - `intersects_once_AB[j * rows_A + w]`: bit i set iff A line i intersects B line j exactly once,
+ *
+ *  - `intersects_once_BA[i * rows_B + w]`: bit j set iff B line j intersects A line i exactly once
+ *    (both transposes of each other, allows us row-major access from either direction).
+ *
+ *  - `overlaps_AA[i * rows_A + w]`: bit j set iff A lines i and j share at least one point
+ *    (Symmetric: `overlaps_AA[i]` has bit j set iff `overlaps_AA[j]` has bit i set),
+ *
+ *  - `overlaps_BB[i * rows_B + w]`: same as overlaps_AA but for square B lines.
+ *
+ * With ~14k lines per side, intersects_once_AB/BA are ~24MB each and overlaps_AA/BB are ~24MB each. 
+ * All four fit in L3 cache, keeping the bit lookups fast across all tens of millions of calls.
+ *
+ * Also initialises:
  * 
- *  - intersects_once_AB[j * words_A + w]: bit i is set iff A line i intersects B line j exactly once.
+ *  - `all_line_indices_A/B`: identity index arrays [0, 1, ..., count-1] used as the default candidate set when no filtering has been applied.
  * 
- *  - intersects_once_BA[i * words_B + w]: bit j is set iff B line j intersects A line i exactly once.
- *
- * With \~14k lines per side these tables are \~24MB each and fit in L3 cache, making bitwise AND across all candidates far faster than per-pair lookups.
- *
- * Also initialises all_line_indices_A/B (identity index arrays used as the default candidate set) and cand_hash_A/B (Mask-to-index lookup maps).
+ *  - `cand_hash_A/B`: Mask-to-index lookup maps for resolving solution lines to their global candidate indices.
  */
 void precomputeDataStructures() {
     auto start = chrono::steady_clock::now();
@@ -283,14 +299,33 @@ void precomputeDataStructures() {
     intersects_once_AB = new uint64_t[(long long)count_B * rows_A](); // intersects_once_AB[j * rows_A + w]: bit i set iff A line i intersects B line j exactly once.
     intersects_once_BA = new uint64_t[(long long)count_A * rows_B]();
 
-    for (int i = 0; i < count_A; ++i)
-        for (int j = 0; j < count_B; ++j) {
+    for (int i = 0; i < count_A; ++i) 
+        for (int j = 0; j < count_B; ++j) { // for every (A line i, B line j) pair, compute how many points they share
             int v = computeIntersectionCountMask(cand_masks_A[i], cand_masks_B[j]);
             if (v == 1) {
+				// store pair as bit in row j of intersects_once_AB. Each row is `rows_A` 64-bit words wide, so row j starts at offset j*rows_A
+				// line i defined in word i/64 of that row, at bit position i%64. Setting that bit says: A line i intersects B line j exactly once
                 intersects_once_AB[(long long)j * rows_A + i / 64] |= (1ULL << (i % 64));
-                intersects_once_BA[(long long)i * rows_B + j / 64] |= (1ULL << (j % 64));
+                intersects_once_BA[(long long)i * rows_B + j / 64] |= (1ULL << (j % 64)); // symmetric entry, row i, word j/64, bit j%64
             }
         }
+	
+	// zero-initialized bitset table: count_A rows, each rows_A is words wide
+    overlaps_AA = new uint64_t[(long long)count_A * rows_A](); // overlaps_AA[i * rows_A + j/64] bit (j%64) will be set iff A lines i and j share >= 1 point.
+    for (int i = 0; i < count_A; i++)
+        for (int j = i + 1; j < count_A; j++) // j > i: fill upper triangle only, then mirror to avoid redundant work
+            if (computeIntersectionCountMask(cand_masks_A[i], cand_masks_A[j]) > 0) {
+                overlaps_AA[(long long)i * rows_A + j / 64] |= (1ULL << (j % 64)); // Row i, word j/64, bit j%64 marks that line j overlaps line i
+                overlaps_AA[(long long)j * rows_A + i / 64] |= (1ULL << (i % 64)); // (symmetric) Row j, word i/64, bit i%64 marks that line i overlaps line j
+            }
+ 
+    overlaps_BB = new uint64_t[(long long)count_B * rows_B](); // same as overlaps_AA but for Bs
+    for (int i = 0; i < count_B; i++)
+        for (int j = i + 1; j < count_B; j++)
+            if (computeIntersectionCountMask(cand_masks_B[i], cand_masks_B[j]) > 0) {
+                overlaps_BB[(long long)i * rows_B + j / 64] |= (1ULL << (j % 64));
+                overlaps_BB[(long long)j * rows_B + i / 64] |= (1ULL << (i % 64));
+            }
 
 	all_line_indices_A = new int[count_A];
 	for(int i = 0; i < count_A; i++)
@@ -305,7 +340,7 @@ void precomputeDataStructures() {
 	cand_hash_B.reserve(count_B);
 	for (int i = 0; i < count_B; ++i)
 		cand_hash_B[cand_masks_B[i]] = i;
-    
+
     auto end = chrono::steady_clock::now();
     double elapsed = chrono::duration<double>(end - start).count();
     cout << "Precomputed intersections using masks in " << elapsed << " seconds." << endl;
@@ -425,10 +460,7 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
     auto timer = chrono::steady_clock::now();
 #endif
     
-    vector<int> observed;
     CaDiCaL::Solver solver;
-
-	int var_cnt = A_count + A_count;
 
 	for(int i = 0; i < trans_A; i++)
 		solver.clause(i+1);
@@ -440,37 +472,120 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
 	timer = chrono::steady_clock::now();
 #endif
 
-	if(trans_A < order)
-		for(int i = 0; i < A_count; i++)
-			for(int j = i + 1; j < A_count; j++)
-				if(computeIntersectionCountMask(cand_masks_A[A_indices[i]], cand_masks_A[A_indices[j]]) > 0)
-					solver.clause(-(i + 1), -(j + 1));
-					
-	if(trans_B < order)
-		for(int i = 0; i < B_count; i++)
-			for(int j = i + 1; j < B_count; j++)
-				if(computeIntersectionCountMask(cand_masks_B[B_indices[i]], cand_masks_B[B_indices[j]]) > 0)
-					solver.clause(-(i + 1 + A_count), -(j + 1 + A_count));
-    
-    for (int p = 0; p < order*order; p++) { // go through all a's, check if a has pth position true, if so solver.add(i)
-		for (size_t i = 0; i < A_count; i++) {
-			const Mask& m = cand_masks_A[A_indices[i]]; 
-			if(m.isSet(p))
-				solver.add(i + 1);
-		}
-		solver.add(0);
-	}
-    for (int p = 0; p < order*order; p++) {
-		for (size_t i = 0; i < B_count; i++) {
-			const Mask& m = cand_masks_B[B_indices[i]]; 
-			if(m.isSet(p))
-				solver.add(i + 1 + A_count);
-		}
-		solver.add(0);
-	}
+    if (trans_A < order) // if A is not fully determined by the partial solution
+        for (int i = 0; i < A_count; i++)
+            for (int j = i + 1; j < A_count; j++) // check if lines A_indices[i] and A_indices[j] overlap
+				// row A_indices[i], word A_indices[j]/64 gives the right 64-bit word, right-shifting by A_indices[j]%64 moves the target bit to position 0.
+                if ((overlaps_AA[(long long)A_indices[i] * rows_A + A_indices[j] / 64] >> (A_indices[j] % 64)) & 1) // AND with 1 isolates bit: result is 1 if they overlap, 0 if not.
+                    solver.clause(-(i + 1), -(j + 1)); // at most one of SAT var i+1, var j+1 may be chosen
+ 
+    if (trans_B < order)
+        for (int i = 0; i < B_count; i++)
+            for (int j = i + 1; j < B_count; j++)
+                if ((overlaps_BB[(long long)B_indices[i] * rows_B + B_indices[j] / 64] >> (B_indices[j] % 64)) & 1)
+                    solver.clause(-(i + 1 + A_count), -(j + 1 + A_count));
 
 #if TRACK_TIME == 1
-    double covering_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
+    double atmost_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
+	timer = chrono::steady_clock::now();
+#endif
+ 
+    {
+		// stack-allocated flat buffer of (point, var) pairs: one entry per set bit across all filtered candidates.
+        int* buf_point = (int*)alloca(A_count * order * sizeof(int));
+        int* buf_var   = (int*)alloca(A_count * order * sizeof(int));
+        int  buf_len   = 0;
+ 
+        for (int i = 0; i < A_count; i++) {
+            const int var = i + 1; // SAT variable for this candidate (1-based)
+            uint64_t lo = cand_masks_A[A_indices[i]].lo; // bits 0–63: represent grid points 0–63
+            uint64_t hi = cand_masks_A[A_indices[i]].hi; // bits 0–35: represent grid points 64–99
+            while (lo) { 
+				int b = __builtin_ctzll(lo); // count trailing zeros = index of the lowest set bit = covered point index
+				buf_point[buf_len] = b; 	 // record which point this candidate covers
+				buf_var[buf_len++] = var;	 // record which SAT var covers it
+				lo &= lo - 1; // clear the lowest set bit: lo-1 flips all bits up to and including it, ANDing with lo zeroes that bit and leaves all higher bits unchanged
+			}
+            while (hi) { 
+				int b = __builtin_ctzll(hi); 
+				buf_point[buf_len] = 64 + b; // add 64 because hi bits represent points 64–99
+				buf_var[buf_len++] = var; 
+				hi &= hi - 1; 
+			}
+        }
+ 
+        // counting sort by point index (range [0, order^2)) so we can group vars by point they cover and add one covering clause per point
+		int cnt[order * order] = {};
+        for (int k = 0; k < buf_len; k++) 
+			cnt[buf_point[k]]++; // tally how many vars cover each point
+        int off[order * order + 1];
+        off[0] = 0;
+        for (int p = 0; p < order * order; p++) 
+			off[p + 1] = off[p] + cnt[p]; // exclusive prefix sum
+		// off[p] = start index in sorted_vars for point p, off[p+1] = start index for point p+1, so sorted_vars[off[p]..off[p+1]) is the slice for point p
+ 
+        int* sorted_vars = (int*)alloca(buf_len * sizeof(int));
+        memset(cnt, 0, sizeof(cnt)); // reuse cnt as a per-point write cursor into sorted_vars
+        for (int k = 0; k < buf_len; k++) {
+            int p = buf_point[k];
+            sorted_vars[off[p] + cnt[p]++] = buf_var[k]; // off[p] is the base for point p's slice;
+				// cnt[p] is how many vars have been written there so far, so off[p]+cnt[p] is the next empty slot; then cnt[p] is incremented
+        }
+ 
+        for (int p = 0; p < order * order; p++) {
+            for (int k = off[p]; k < off[p + 1]; k++) 
+				solver.add(sorted_vars[k]); // add each var that covers point p as a literal in this clause
+            solver.add(0); // terminate clause with 0: encodes at least one of these vars must be true
+        }
+    }
+ 
+    { // Same for B.
+        int* buf_point = (int*)alloca(B_count * order * sizeof(int));
+        int* buf_var   = (int*)alloca(B_count * order * sizeof(int));
+        int  buf_len   = 0;
+ 
+        for (int i = 0; i < B_count; i++) {
+            const int var = i + 1 + A_count;
+            uint64_t lo = cand_masks_B[B_indices[i]].lo;
+            uint64_t hi = cand_masks_B[B_indices[i]].hi;
+            while (lo) { 
+				int b = __builtin_ctzll(lo); 
+				buf_point[buf_len] = b;      
+				buf_var[buf_len++] = var; 
+				lo &= lo - 1; 
+			}
+            while (hi) { 
+				int b = __builtin_ctzll(hi); 
+				buf_point[buf_len] = 64 + b; 
+				buf_var[buf_len++] = var; 
+				hi &= hi - 1; 
+			}
+        }
+ 
+        int cnt[order * order] = {};
+        for (int k = 0; k < buf_len; k++) 
+			cnt[buf_point[k]]++;
+        int off[order * order + 1];
+        off[0] = 0;
+        for (int p = 0; p < order * order; p++) 
+			off[p + 1] = off[p] + cnt[p];
+ 
+        int* sorted_vars = (int*)alloca(buf_len * sizeof(int));
+        memset(cnt, 0, sizeof(cnt));
+        for (int k = 0; k < buf_len; k++) {
+            int p = buf_point[k];
+            sorted_vars[off[p] + cnt[p]++] = buf_var[k];
+        }
+ 
+        for (int p = 0; p < order * order; p++) {
+            for (int k = off[p]; k < off[p + 1]; k++) 
+				solver.add(sorted_vars[k]);
+            solver.add(0);
+        }
+    }
+
+#if TRACK_TIME == 1
+    double atleast_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 	timer = chrono::steady_clock::now();
 #endif
 
@@ -479,7 +594,7 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
             const int a_idx = A_indices[i];
             const int a_var = i + 1;
         	for (size_t j = 0; j < B_count; j++) 
-                if (computeIntersectionCountMask(cand_masks_A[a_idx], cand_masks_B[B_indices[j]]) != 1)
+                if (!((intersects_once_AB[(long long)B_indices[j] * rows_A + a_idx / 64] >> (a_idx % 64)) & 1))
                     solver.clause(-a_var, -(A_count + j + 1));
         }
     }
@@ -501,10 +616,10 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
 		<< ", Refinement search took " << solver_elapsed << " (Total: " << (setup_elapsed + covering_elapsed + intersections_elapsed + solver_elapsed) << ")\n";
 	#endif
 	total_sat_setup_time += setup_elapsed;
-	total_sat_covering_time += covering_elapsed;
+	total_sat_atleast1_time += atleast_elapsed;
+	total_sat_atmost1_time += atmost_elapsed;
 	total_sat_intersection_time += intersections_elapsed;
 	total_sat_solving_time += solver_elapsed;
-	total_sat_encoding_time += covering_elapsed + intersections_elapsed + setup_elapsed;
 #endif
 
     return sol_count;
@@ -739,24 +854,26 @@ int main(int argc, char* argv[]) {
 	cout << "File: " << solution_file << endl;
 
 #if TRACK_TIME == 1
-	double sat_total = total_sat_encoding_time + total_sat_solving_time;
+	double sat_total_encode = total_sat_atmost1_time + total_sat_atleast1_time + total_sat_intersection_time;
+	double sat_total = sat_total_encode + total_sat_solving_time;
 	double line_total = total_line_read_time + total_line_finding_time + total_line_parallel_time + total_line_intersection_time;
 
 	cout << "\n=== TOTAL TIMES FOR THIS RUN ===\n";
 	cout << "SAT Setup: " << total_sat_setup_time << "s" << endl;
-	cout << "SAT Covering: " << total_sat_covering_time << "s" << endl;
+	cout << "SAT At-Most: " << total_sat_atmost1_time << "s" << endl;
+	cout << "SAT At-Least: " << total_sat_atleast1_time << "s" << endl;
 	cout << "SAT Intersections: " << total_sat_intersection_time << "s" << endl;
-	cout << "SAT Encoding: " << total_sat_encoding_time << "s" << endl; // total of covering, intersection and set up
+	cout << "SAT Encoding: " << sat_total_encode << "s" << endl; // total of covering, intersection and set up
 	cout << "SAT Solving: " << total_sat_solving_time << "s" << endl;
-	cout << "SAT Total: " << sat_total << "s" << endl;
 
 	cout << "\nLine Read: " << total_line_read_time << "s" << endl;
 	cout << "Line Finding: " << total_line_finding_time << "s" << endl;
 	cout << "Line Parallel: " << total_line_parallel_time << "s" << endl;
 	cout << "Line Intersection: " << total_line_intersection_time << "s" << endl;
-	cout << "Line Total: " << line_total << "s" << endl;
 
-	cout << "\nMissing Time: " << elapsed - (sat_total + line_total) << "s" << endl;
+	cout << "\nSAT Total: " << sat_total << "s" << endl;
+	cout << "Line Total: " << line_total << "s" << endl;
+	cout << "Missing Time: " << elapsed - (sat_total + line_total) << "s" << endl;
 #endif
 
 #if MAX_RUNTIME > 0
@@ -765,4 +882,3 @@ int main(int argc, char* argv[]) {
 
 	return 0;
 }
-
