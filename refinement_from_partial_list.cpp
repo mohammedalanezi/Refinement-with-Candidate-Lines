@@ -45,7 +45,7 @@ long partial_count = 0;
 int count_A = 0;
 int count_B = 0;
 
-#if TRACK_TIME == 1 // This tracking probably doesn't work the best when we are multithreading, TODO: fix that
+#if TRACK_TIME == 1 // tracking probably doesn't work the best when we are multithreading, TODO: fix that
 double total_sat_solving_time = 0.0; // wall time
 double total_sat_encoding_time = 0.0;
 double total_sat_covering_time = 0.0;
@@ -765,3 +765,4 @@ int main(int argc, char* argv[]) {
 
 	return 0;
 }
+
