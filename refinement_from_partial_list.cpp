@@ -151,24 +151,26 @@ Mask make_mask(const int* line) {
 }
 
 /**
- * @brief Counts the number of points shared between two Masks.
- * Uses hardware popcount on the bitwise AND of both halves of the masks, gives the number of bits set in both.
+ * @brief Checks if two Masks intersect exactly once.
+ * Uses bitwise operators on both halves of the masks to check if they are a power of 2.
  * @param m1 The first mask.
  * @param m2 The second mask.
- * @returns The number of points present in both m1 and m2.
+ * @returns If m1 and m2 intersect once.
  */
-int computeIntersectionCountMask(const Mask& m1, const Mask& m2) {
-    return __builtin_popcountll(m1.lo & m2.lo) + __builtin_popcountll(m1.hi & m2.hi);
+bool intersectsExactlyOnce(const Mask& m1, const Mask& m2) {
+    __int128 combined = ((__int128)(m1.hi & m2.hi) << 64) | (m1.lo & m2.lo);
+    return combined != 0 && (combined & (combined - 1)) == 0;
 }
 
 /**
- * @brief Counts the number of points in a Masks.
- * Uses hardware popcount.
- * @param m The mask.
- * @returns The number of points present in m.
+ * @brief Checks if two Masks intersect.
+ * Uses bitwise operators on both halves of the masks to check if they intersect.
+ * @param m1 The first mask.
+ * @param m2 The second mask.
+ * @returns If m1 and m2 intersect.
  */
-int countMask(const Mask& m) {
-    return __builtin_popcountll(m.lo) + __builtin_popcountll(m.hi);
+bool linesIntersect(const Mask& m1, const Mask& m2) {
+    return ((m1.lo & m2.lo) | (m1.hi & m2.hi)) != 0;
 }
 
 /**
@@ -321,8 +323,7 @@ void precomputeDataStructures() {
 
     for (int i = 0; i < count_A; ++i) 
         for (int j = 0; j < count_B; ++j) { // for every (A line i, B line j) pair, compute how many points they share
-            int v = computeIntersectionCountMask(cand_masks_A[i], cand_masks_B[j]);
-            if (v == 1) {
+            if (intersectsExactlyOnce(cand_masks_A[i], cand_masks_B[j])) {
 				// store pair as bit in row j of intersects_once_AB. Each row is `rows_A` 64-bit words wide, so row j starts at offset j*rows_A
 				// line i defined in word i/64 of that row, at bit position i%64. Setting that bit says: A line i intersects B line j exactly once
                 intersects_once_AB[(long long)j * rows_A + i / 64] |= (1ULL << (i % 64));
@@ -334,7 +335,7 @@ void precomputeDataStructures() {
     overlaps_AA = new uint64_t[(long long)count_A * rows_A](); // overlaps_AA[i * rows_A + j/64] bit (j%64) will be set iff A lines i and j share >= 1 point.
     for (int i = 0; i < count_A; i++)
         for (int j = i + 1; j < count_A; j++) // j > i: fill upper triangle only, then mirror to avoid redundant work
-            if (computeIntersectionCountMask(cand_masks_A[i], cand_masks_A[j]) > 0) {
+            if (linesIntersect(cand_masks_A[i], cand_masks_A[j])) {
                 overlaps_AA[(long long)i * rows_A + j / 64] |= (1ULL << (j % 64)); // Row i, word j/64, bit j%64 marks that line j overlaps line i
                 overlaps_AA[(long long)j * rows_A + i / 64] |= (1ULL << (i % 64)); // (symmetric) Row j, word i/64, bit i%64 marks that line i overlaps line j
             }
@@ -342,7 +343,7 @@ void precomputeDataStructures() {
     overlaps_BB = new uint64_t[(long long)count_B * rows_B](); // same as overlaps_AA but for Bs
     for (int i = 0; i < count_B; i++)
         for (int j = i + 1; j < count_B; j++)
-            if (computeIntersectionCountMask(cand_masks_B[i], cand_masks_B[j]) > 0) {
+            if (linesIntersect(cand_masks_B[i], cand_masks_B[j])) {
                 overlaps_BB[(long long)i * rows_B + j / 64] |= (1ULL << (j % 64));
                 overlaps_BB[(long long)j * rows_B + i / 64] |= (1ULL << (i % 64));
             }
@@ -408,7 +409,7 @@ void getAllParallelLineIndices(int*& parallel_indices, int& parallel_count, cons
 	}
 
     for (size_t i = 0; i < masks.size(); i++)
-		if(computeIntersectionCountMask(masks[i], total_incidence) == 0)
+		if(!linesIntersect(masks[i], total_incidence))
 			parallel_indices[parallel_count++] = i;
 }
 
@@ -830,7 +831,7 @@ int main(int argc, char* argv[]) {
 						total_refinements += refinement_count;
 					else if(refinement_count < 0)
 						skipped_partial_solutions += 1;
-					if (partial_count % 1000 == 0) {
+					if (partial_count % 1000 == 0) { 
 						auto current_time = chrono::steady_clock::now();
 						double elapsed = chrono::duration<double>(current_time - start_time).count();
 						cout << "Processed " << partial_count << " partial solutions. Time elapsed: " << elapsed << " seconds with total refinements: " << total_refinements << endl;
@@ -897,7 +898,7 @@ int main(int argc, char* argv[]) {
 	
 	cout << "=== FINAL RESULTS FOR TEMPLATE " << template_id - 1 << " ===\n";
 	cout << "Total refinements found: " << total_refinements << endl;
-	cout << "Partial solutions processed: " << partial_count << "(" << skipped_partial_solutions << " skipped)" << endl;
+	cout << "Partial solutions processed: " << partial_count << " (" << skipped_partial_solutions << " skipped)" << endl;
 	cout << "Time elapsed: " << elapsed << " seconds\n";
 	cout << "Throughput: " << (partial_count / elapsed) << " solutions/sec\n";
 	cout << "File: " << solution_file << endl;
