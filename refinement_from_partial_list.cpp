@@ -23,7 +23,7 @@
 
 #define TRACK_TIME 1
 #define PRINT_TIME 0
-#define MAX_RUNTIME 30 // a value below or equal to 0 skips timeout
+#define MAX_RUNTIME 0 // a value below or equal to 0 skips timeout
 
 using namespace std;
 
@@ -362,7 +362,7 @@ void precomputeDataStructures() {
  *                          since the caller already holds the raw masks before the hash lookup.
  * @param is_A              If true, operates on square A candidates; otherwise square B.
  */
-void getAllParallelLineIndices(int*& parallel_indices, int& parallel_count, const int line_indices[], const int line_count, const __uint128_t& total_incidence, bool is_A) {
+void getAllParallelLineIndices(int*& parallel_indices, int& parallel_count, const int line_indices[], const int line_count, bool is_A) {
     int*        all      = is_A ? all_line_indices_A  : all_line_indices_B;
     const int   all_size = is_A ? count_A             : count_B;
     const auto& masks    = is_A ? cand_masks_A        : cand_masks_B;
@@ -378,6 +378,10 @@ void getAllParallelLineIndices(int*& parallel_indices, int& parallel_count, cons
 
     if (line_count == order)
         return;
+
+	__uint128_t total_incidence = masks[line_indices[0]];
+	for(int i=1; i < line_count; i++)
+		total_incidence |= masks[line_indices[i]]; 
 
     for (size_t i = 0; i < masks.size(); i++)
         if(!linesIntersect(masks[i], total_incidence))
@@ -695,21 +699,13 @@ int processLine(string& line)
 	auto index_time = chrono::steady_clock::now();
 #endif
 
-	// Build total_incidence directly from raw solution masks
-	__uint128_t total_incidence_A = 0;
-	__uint128_t total_incidence_B = 0;
-	
 	// Convert solution lines to their candidate line indices and compute incidence strings
 	int A_sol_indices[trans_A];
 	int B_sol_indices[trans_B];
-	for (int i = 0; i < trans_A; i++) {
+	for (int i = 0; i < trans_A; i++)
 		A_sol_indices[i] = cand_hash_A[A_sol_lines[i]];
-		total_incidence_A |= A_sol_lines[i];
-	}
-	for (int i = 0; i < trans_B; i++) {
+	for (int i = 0; i < trans_B; i++) 
 		B_sol_indices[i] = cand_hash_B[B_sol_lines[i]];
-		total_incidence_B |= B_sol_lines[i];
-	}
 
 #if TRACK_TIME == 1
 	double elapsed_index = chrono::duration<double>(chrono::steady_clock::now() - index_time).count();
@@ -721,8 +717,8 @@ int processLine(string& line)
 	int* parallel_B_indices = (int*)alloca(count_B * sizeof(int));
 	int  parallel_B_count = 0;
 
-	getAllParallelLineIndices(parallel_A_indices, parallel_A_count, A_sol_indices, trans_A, total_incidence_A, true);
-	getAllParallelLineIndices(parallel_B_indices, parallel_B_count, B_sol_indices, trans_B, total_incidence_B, false);
+	getAllParallelLineIndices(parallel_A_indices, parallel_A_count, A_sol_indices, trans_A, true);
+	getAllParallelLineIndices(parallel_B_indices, parallel_B_count, B_sol_indices, trans_B, false);
 
 #if TRACK_TIME == 1
 	double elapsed_2 = chrono::duration<double>(chrono::steady_clock::now() - parallel_time).count();
@@ -908,7 +904,7 @@ int main(int argc, char* argv[]) {
 	return 0;
 }
 
-/*
+/* 
 Possible TODO list:
 1. see if their is a faster way to read files than ifstream 
 	(maybe there is a special one for single core mode where it doesn't save anything to memory? would need to check if memory is even an issue.)
