@@ -64,18 +64,28 @@ double total_sat_intersection_time = 0.0;
 double total_sat_setup_time = 0.0;
 
 double total_line_read_time = 0.0;
+double total_line_parse_time = 0.0;
 double total_line_finding_time = 0.0;
 double total_line_parallel_time = 0.0;
 double total_line_intersection_time = 0.0;
+
+double total_stream_read_time = 0.0; // time spent in getline() itself
+double total_hash_dedup_time = 0.0;  // time spent hashing + seen.insert()
 #endif
 
 struct U128Hash {
     size_t operator()(__uint128_t v) const {
         uint64_t lo = (uint64_t)v;
         uint64_t hi = (uint64_t)(v >> 64);
-        size_t h = lo;
-        h ^= hi + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-        return h;
+        // MurmurHash inspired finalizer
+        lo ^= lo >> 33; 
+		lo *= 0xff51afd7ed558ccdULL; 
+		lo ^= lo >> 33;
+
+        hi ^= hi >> 33; 
+		hi *= 0xc4ceb9fe1a85ec53ULL; 
+		hi ^= hi >> 33;
+        return lo ^ (hi * 0x9e3779b97f4a7c15ULL);
     }
 };
 
@@ -330,10 +340,10 @@ void precomputeDataStructures() {
 	for(int i = 0; i < count_B; i++)
 		all_line_indices_B[i] = i;
 
-	cand_hash_A.reserve(count_A);
+	cand_hash_A.reserve(count_A * 2); // halves load factor so we have 2x fewer collision chains
 	for (int i = 0; i < count_A; ++i)
 		cand_hash_A[cand_masks_A[i]] = i;
-	cand_hash_B.reserve(count_B);
+	cand_hash_B.reserve(count_B * 2);
 	for (int i = 0; i < count_B; ++i)
 		cand_hash_B[cand_masks_B[i]] = i;
 
@@ -739,7 +749,8 @@ int processLine(string& line)
 	#if PRINT_TIME == 1
 	cout << "Conversion Time: " << elapsed_1 << ", Index Finding: " << elapsed_index << ", Parallel Time: " << elapsed_2 << ", Intersection Time: " << elapsed_3 << " (Total: " << (elapsed_1 + elapsed_index + elapsed_2 + elapsed_3) << ")" << endl;
 	#endif
-	total_line_read_time += elapsed_0 + elapsed_1;
+	total_line_read_time += elapsed_0;
+	total_line_parse_time += elapsed_1;
 	total_line_finding_time += elapsed_index;
 	total_line_parallel_time += elapsed_2;
 	total_line_intersection_time += elapsed_3;
@@ -788,15 +799,33 @@ int main(int argc, char* argv[]) {
 	
 	long long total_refinements = 0;
 
-	unordered_set<string> seen;
-	seen.reserve(1500000);
+	unordered_set<size_t> seen;
+	seen.reserve(2000000);
 	
 	start_time = chrono::steady_clock::now();
 	#if ENABLE_MT == 0
 		string line;
-		while (getline(sol_stream, line))
-			if (!line.empty())
-				if (seen.insert(line).second) {
+		while (true) {
+			#if TRACK_TIME == 1
+			auto stream_time = chrono::steady_clock::now();
+			#endif
+			bool got_line = (bool)getline(sol_stream, line);
+			#if TRACK_TIME == 1
+			total_stream_read_time += chrono::duration<double>(chrono::steady_clock::now() - stream_time).count();
+			#endif
+			if (!got_line) break;
+			if (!line.empty()) {
+				#if TRACK_TIME == 1
+				auto hash_time = chrono::steady_clock::now();
+				#endif
+				size_t h = 14695981039346656037ULL; // FNV-1a hash
+				for (unsigned char c : line) 
+					h = (h ^ c) * 1099511628211ULL;
+				bool is_new = seen.insert(h).second;
+				#if TRACK_TIME == 1
+				total_hash_dedup_time += chrono::duration<double>(chrono::steady_clock::now() - hash_time).count();
+				#endif
+				if (is_new) {
 					long int refinement_count = processLine(line); 
 					if(refinement_count > 0)
 						total_refinements += refinement_count;
@@ -810,6 +839,8 @@ int main(int argc, char* argv[]) {
 					if(MAX_RUNTIME > 0 && MAX_RUNTIME < chrono::duration<double>(chrono::steady_clock::now() - start_time).count())
 						break;
 				}
+			}
+		}
 		sol_stream.close();
 		cout << "\n";
 	#else
@@ -817,14 +848,32 @@ int main(int argc, char* argv[]) {
 		all_solution_lines.reserve(1500000);
 		
 		string line;
-		while (getline(sol_stream, line)) {
+		while (true) {
+			#if TRACK_TIME == 1
+			auto t_stream = chrono::steady_clock::now();
+			#endif
+			bool got_line = (bool)getline(sol_stream, line);
+			#if TRACK_TIME == 1
+			total_stream_read_time += chrono::duration<double>(chrono::steady_clock::now() - t_stream).count();
+			#endif
+			if (!got_line) break;
 			if (!line.empty()) {
-				if (seen.insert(line).second) 
+				#if TRACK_TIME == 1
+				auto t_hash = chrono::steady_clock::now();
+				#endif
+				size_t h = 14695981039346656037ULL;
+				for (unsigned char c : line)
+					h = (h ^ c) * 1099511628211ULL;
+				bool is_new = seen.insert(h).second;
+				#if TRACK_TIME == 1
+				total_hash_dedup_time += chrono::duration<double>(chrono::steady_clock::now() - t_hash).count();
+				#endif
+				if (is_new)
 					all_solution_lines.push_back(move(line));
 			}
 		}
 		sol_stream.close();
-		seen = unordered_set<string>();
+		seen = unordered_set<size_t>(); // free memory; hashes no longer needed
 		
 		cout << "Loaded " << all_solution_lines.size() << " solutions to process.\n"; // show add a timer for this to display how long this took
 		
@@ -877,7 +926,8 @@ int main(int argc, char* argv[]) {
 #if TRACK_TIME == 1
 	double sat_total_encode = total_sat_atmost1_time + total_sat_atleast1_time + total_sat_intersection_time;
 	double sat_total = sat_total_encode + total_sat_solving_time;
-	double line_total = total_line_read_time + total_line_finding_time + total_line_parallel_time + total_line_intersection_time;
+	double line_total = total_line_read_time + total_line_parse_time + total_line_finding_time + total_line_parallel_time + total_line_intersection_time;
+	double io_total = total_stream_read_time + total_hash_dedup_time;
 
 	cout << "\n=== TOTAL TIMES FOR THIS RUN ===\n";
 	cout << "SAT Setup: " << total_sat_setup_time << "s" << endl;
@@ -887,14 +937,19 @@ int main(int argc, char* argv[]) {
 	cout << "SAT Encoding: " << sat_total_encode << "s" << endl; // total of covering, intersection and set up
 	cout << "SAT Solving: " << total_sat_solving_time << "s" << endl;
 
+	cout << "\nStream Read: " << total_stream_read_time << "s" << endl;
+	cout << "Hash Dedup: " << total_hash_dedup_time << "s" << endl;
+	
 	cout << "\nLine Read: " << total_line_read_time << "s" << endl;
+	cout << "Line Parsing: " << total_line_parse_time << "s" << endl;
 	cout << "Line Finding: " << total_line_finding_time << "s" << endl;
 	cout << "Line Parallel: " << total_line_parallel_time << "s" << endl;
 	cout << "Line Intersection: " << total_line_intersection_time << "s" << endl;
 
 	cout << "\nSAT Total: " << sat_total << "s" << endl;
+	cout << "IO Total: " << io_total << "s" << endl;
 	cout << "Line Total: " << line_total << "s" << endl;
-	cout << "Missing Time: " << elapsed - (sat_total + line_total) << "s" << endl;
+	cout << "Missing Time: " << elapsed - (sat_total + line_total + io_total) << "s" << endl;
 #endif
 
 #if MAX_RUNTIME > 0
@@ -907,7 +962,7 @@ int main(int argc, char* argv[]) {
 /* 
 Possible TODO list:
 1. see if their is a faster way to read files than ifstream 
-	(maybe there is a special one for single core mode where it doesn't save anything to memory? would need to check if memory is even an issue.)
+	(nmap? need to check timings more to see if its actually an issue.)
 
 cd /mnt/g/Code/sat\ solver\ stuff/library/
 */
