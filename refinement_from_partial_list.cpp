@@ -92,6 +92,9 @@ struct U128Hash {
 unordered_map<__uint128_t, int, U128Hash> cand_hash_A;
 unordered_map<__uint128_t, int, U128Hash> cand_hash_B;
 
+struct VarInfo { int8_t sq, r, c, s; }; // 4 bytes per entry
+VarInfo var_lookup[2 * order * order * order + 1]; // index by var (1-based)
+
 // Debugging helpers (not used in hot path)
 void mask_print(__uint128_t m) {
     uint64_t hi = (uint64_t)(m >> 64);
@@ -251,16 +254,16 @@ void solutionToCandidateLines(const int* solution, const int& solution_count, __
     int points_by_symbol[2][order][order];
     int counts[2][order] = {0};
 
-	for(int i = 0; i < solution_count; i++) {
+	for (int i = 0; i < solution_count; i++) {
 		int var = solution[i];
 		if (var <= 0) continue;
-		auto [sq, r, c, s] = indexTo4Tuple(var, 2, order, order, order);
-		int point = get1DIndex(r, c);
-        int &cnt = counts[sq][s];
-        if (cnt < order) {
-            points_by_symbol[sq][s][cnt++] = point;
-        }
+		const VarInfo& v = var_lookup[var];   // one array lookup, no division
+		int point = v.r * order + v.c + 1;
+		int& cnt = counts[v.sq][v.s];
+		if (cnt < order)
+			points_by_symbol[v.sq][v.s][cnt++] = point;
 	}
+
 
 	for (int sq = 0; sq < 2; ++sq)
 		for (int s = 0; s < order; ++s)
@@ -295,6 +298,8 @@ void solutionToCandidateLines(const int* solution, const int& solution_count, __
  *  - `all_line_indices_A/B`: identity index arrays [0, 1, ..., count-1] used as the default candidate set when no filtering has been applied.
  * 
  *  - `cand_hash_A/B`: __uint128_t-to-index lookup maps for resolving solution lines to their global candidate indices.
+ * 
+ *  - `var_lookup`: int to 4 tuple look up map, used to avoid needing to divide multiple times per line.
  */
 void precomputeDataStructures() {
     auto start = chrono::steady_clock::now();
@@ -346,6 +351,11 @@ void precomputeDataStructures() {
 	cand_hash_B.reserve(count_B * 2);
 	for (int i = 0; i < count_B; ++i)
 		cand_hash_B[cand_masks_B[i]] = i;
+
+	for (int var = 1; var <= 2 * order * order * order; var++) {
+		auto [sq, r, c, s] = indexTo4Tuple(var, 2, order, order, order);
+		var_lookup[var] = { (int8_t)sq, (int8_t)r, (int8_t)c, (int8_t)s };
+	}
 
     auto end = chrono::steady_clock::now();
     double elapsed = chrono::duration<double>(end - start).count();
@@ -677,13 +687,21 @@ int processLine(string& line)
 	if (line.back() == '0')
 		line.pop_back();
 
-	istringstream iss(line);
 	int solution[order * order];
-	int solution_count = 0;
-	int x;
-	while (iss >> x)
-		if (x != 0) 
+	int solution_count = 0;const char* p = line.c_str();
+	const char* end = p + line.size();
+	while (p < end) {
+		while (p < end && (*p == ' ' || *p == '\t')) p++; // skip whitespace
+		if (p >= end) break;
+		int x = 0;
+		bool neg = (*p == '-');
+		if (neg) p++;
+		while (p < end && *p >= '0' && *p <= '9')
+			x = x * 10 + (*p++ - '0');
+		if (neg) x = -x;
+		if (x != 0)
 			solution[solution_count++] = x;
+	}
 
 	#if ENABLE_MT == 1
 	#pragma omp atomic
