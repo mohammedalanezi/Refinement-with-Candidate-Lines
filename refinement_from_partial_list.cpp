@@ -23,7 +23,7 @@
 
 #define TRACK_TIME 1
 #define PRINT_TIME 0
-#define MAX_RUNTIME 0 // a value below or equal to 0 skips timeout
+#define MAX_RUNTIME 30 // a value below or equal to 0 skips timeout
 
 using namespace std;
 
@@ -51,6 +51,11 @@ int count_B = 0;
 uint64_t* overlaps_AA = nullptr;
 uint64_t* overlaps_BB = nullptr;
 
+__uint128_t all_points_mask; // bit (p-1) set means point p is on this line (points 1–100, so bits 0–99 used)
+
+vector<__uint128_t> cand_masks_A; 
+vector<__uint128_t> cand_masks_B;
+
 #if TRACK_TIME == 1 // This tracking probably doesn't work the best when we are multithreading, TODO: fix that
 double total_sat_solving_time = 0.0; // wall time
 double total_sat_atmost1_time = 0.0;
@@ -64,113 +69,84 @@ double total_line_parallel_time = 0.0;
 double total_line_intersection_time = 0.0;
 #endif
 
-struct Mask {
-    uint64_t lo = 0; // bits 0–63
-    uint64_t hi = 0; // bits 64–127
-	
-    bool operator==(const Mask& other) const {
-        return (lo == other.lo && hi == other.hi);
-    }
-	
-    bool operator!=(const Mask& other) const {
-    	return !(*this == other);
-    }
-	
-    void print() const {
-		for (int i = 63; i >= 0; --i) {
-			std::cout << ((hi >> i) & 1);
-			if (i % 8 == 0 && i > 0) cout << " ";
-		}
-		for (int i = 63; i >= 0; --i) {
-			std::cout << ((lo >> i) & 1);
-			if (i % 8 == 0 && i > 0) cout << " ";
-		}
-		cout << endl;
-    }
-	
-	bool isSet(int p) const {
-		if (p < 0 || p > 127) 
-			return false; // bounds check
-		if (p < 64) {
-			return (lo >> p) & 1ULL;
-		} else {
-			return (hi >> (p - 64)) & 1ULL;
-		}
-	}
-};
-
-struct MaskHash {
-    size_t operator()(const Mask& m) const {
-        size_t h = m.lo;
-        h ^= m.hi + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2); // we combine lo and hi with a good mixing step
+struct U128Hash {
+    size_t operator()(__uint128_t v) const {
+        uint64_t lo = (uint64_t)v;
+        uint64_t hi = (uint64_t)(v >> 64);
+        size_t h = lo;
+        h ^= hi + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
         return h;
     }
 };
 
-unordered_map<Mask, int, MaskHash> cand_hash_A;
-unordered_map<Mask, int, MaskHash> cand_hash_B;
+unordered_map<__uint128_t, int, U128Hash> cand_hash_A;
+unordered_map<__uint128_t, int, U128Hash> cand_hash_B;
 
-vector<Mask> cand_masks_A;
-vector<Mask> cand_masks_B;
-
-Mask all_points_mask;
-
-/**
- * @brief Constructs a 128-bit Mask from a list of point indices (only 100 bits are used).
- * @param line A vector of point values in the range [1, 100]. Each value is converted to a 0-based bit index and set in the mask.
- * @returns A Mask with bits set at each position corresponding to a point in line.
- */
-Mask make_mask(const vector<int>& line) {
-    Mask m;
-    for (int x : line) {
-        int idx = x - 1; // convert 1-100 to 0-99
-        if (idx < 64)
-            m.lo |= (1ULL << idx);
-        else
-            m.hi |= (1ULL << (idx - 64));
+// Debugging helpers (not used in hot path)
+void mask_print(__uint128_t m) {
+    uint64_t hi = (uint64_t)(m >> 64);
+    uint64_t lo = (uint64_t)m;
+    for (int i = 63; i >= 0; --i) {
+        cout << ((hi >> i) & 1);
+        if (i % 8 == 0 && i > 0) cout << " ";
     }
-    return m;
+    for (int i = 63; i >= 0; --i) {
+        cout << ((lo >> i) & 1);
+        if (i % 8 == 0 && i > 0) cout << " ";
+    }
+    cout << endl;
+}
+
+bool mask_isSet(__uint128_t m, int p) {
+    if (p < 0 || p > 127) return false;
+    return (m >> p) & 1;
 }
 
 /**
- * @brief Constructs a 128-bit Mask from a fixed-length array of point indices (only 100 bits are used).
- * @param line A raw array of exactly `order` point values in the range [1, 100]. Each value is converted to a 0-based bit index and set in the mask.
- * @returns A Mask with bits set at each position corresponding to a point in line.
+ * @brief Constructs a 128-bit __uint128_t from a list of point indices (only 100 bits are used).
+ * @param line A vector of point values in the range [1, 100]. Each value is converted to a 0-based bit index and set in the __uint128_t.
+ * @returns A __uint128_t with bits set at each position corresponding to a point in line.
  */
-Mask make_mask(const int* line) {
-    Mask m;
-	for(int i = 0; i < order; i++) {
-		int x = line[i];
-        int idx = x - 1; // convert 1-100 to 0-99
-        if (idx < 64)
-            m.lo |= (1ULL << idx);
-        else
-            m.hi |= (1ULL << (idx - 64));
-    }
+__uint128_t make_mask(const vector<int>& line) {
+    __uint128_t m = 0;
+    for (int x : line)
+        m |= ((__uint128_t)1 << (x - 1)); // convert 1-100 to bit index 0-99
+    return m; 
+}
+
+/**
+ * @brief Constructs a 128-bit __uint128_t from a fixed-length array of point indices (only 100 bits are used).
+ * @param line A raw array of exactly `order` point values in the range [1, 100]. Each value is converted to a 0-based bit index and set in the __uint128_t.
+ * @returns A __uint128_t with bits set at each position corresponding to a point in line.
+ */
+__uint128_t make_mask(const int* line) {
+    __uint128_t m = 0;
+    for (int i = 0; i < order; i++)
+        m |= ((__uint128_t)1 << (line[i] - 1)); // convert 1-100 to bit index 0-99
     return m;
 }
 
 /**
  * @brief Checks if two Masks intersect exactly once.
  * Uses bitwise operators on both halves of the masks to check if they are a power of 2.
- * @param m1 The first mask.
- * @param m2 The second mask.
+ * @param m1 The first __uint128_t.
+ * @param m2 The second __uint128_t.
  * @returns If m1 and m2 intersect once.
  */
-bool intersectsExactlyOnce(const Mask& m1, const Mask& m2) {
-    __int128 combined = ((__int128)(m1.hi & m2.hi) << 64) | (m1.lo & m2.lo);
-    return combined != 0 && (combined & (combined - 1)) == 0;
+bool intersectsExactlyOnce(__uint128_t m1, __uint128_t m2) {
+    __uint128_t c = m1 & m2;
+    return c != 0 && (c & (c - 1)) == 0;
 }
 
 /**
  * @brief Checks if two Masks intersect.
  * Uses bitwise operators on both halves of the masks to check if they intersect.
- * @param m1 The first mask.
- * @param m2 The second mask.
+ * @param m1 The first __uint128_t.
+ * @param m2 The second __uint128_t.
  * @returns If m1 and m2 intersect.
  */
-bool linesIntersect(const Mask& m1, const Mask& m2) {
-    return ((m1.lo & m2.lo) | (m1.hi & m2.hi)) != 0;
+bool linesIntersect(__uint128_t m1, __uint128_t m2) {
+    return (m1 & m2) != 0;
 }
 
 /**
@@ -193,13 +169,13 @@ vector<int> parse_line(const string& line, char prefix) {
 
 /**
  * @brief Loads candidate lines from a text file and converts them to Masks.
- * Each line in the file beginning with 'R' or 'N' is parsed as a list of point indices and converted to a Mask. All points encountered across all lines are collected into a set.
+ * Each line in the file beginning with 'R' or 'N' is parsed as a list of point indices and converted to a __uint128_t. All points encountered across all lines are collected into a set.
  * @param path Path to the candidate lines file.
  * @returns A tuple of: the vector of Masks, the set of all points seen, and the total number of lines loaded.
  */
-tuple<vector<Mask>, unordered_set<int>, int> load_candidate_lines_file(const string& path) {
+tuple<vector<__uint128_t>, unordered_set<int>, int> load_candidate_lines_file(const string& path) {
 	ifstream f(path);
-	vector<Mask> lines;
+	vector<__uint128_t> lines;
 	unordered_set<int> points;
 	string line;
 	while (getline(f, line)) {
@@ -253,7 +229,7 @@ int get1DIndex(int r, int c) {
 /**
  * @brief Extracts the symbol-lines from a partial SAT solution for both squares.
  * A symbol-line is the set of `order` grid points assigned to a single symbol within one square. 
- * For each symbol in each square, if all `order` assignments are present in the solution, the corresponding line is added as a Mask, otherwise line is skipped.
+ * For each symbol in each square, if all `order` assignments are present in the solution, the corresponding line is added as a __uint128_t, otherwise line is skipped.
  * @param solution        Array of positive SAT literals representing the solution.
  * @param solution_count  Number of literals in the solution array.
  * @param a_lines         Output array to write Masks for square A lines into.
@@ -261,7 +237,7 @@ int get1DIndex(int r, int c) {
  * @param b_lines         Output array to write Masks for square B lines into.
  * @param b_solutions     Running count of lines written to b_lines (modified in place).
  */
-void solutionToCandidateLines(const int* solution, const int& solution_count, Mask a_lines[], int& a_solutions, Mask b_lines[], int& b_solutions) {
+void solutionToCandidateLines(const int* solution, const int& solution_count, __uint128_t a_lines[], int& a_solutions, __uint128_t b_lines[], int& b_solutions) {
     int points_by_symbol[2][order][order];
     int counts[2][order] = {0};
 
@@ -308,13 +284,12 @@ void solutionToCandidateLines(const int* solution, const int& solution_count, Ma
  * 
  *  - `all_line_indices_A/B`: identity index arrays [0, 1, ..., count-1] used as the default candidate set when no filtering has been applied.
  * 
- *  - `cand_hash_A/B`: Mask-to-index lookup maps for resolving solution lines to their global candidate indices.
+ *  - `cand_hash_A/B`: __uint128_t-to-index lookup maps for resolving solution lines to their global candidate indices.
  */
 void precomputeDataStructures() {
     auto start = chrono::steady_clock::now();
 
-	all_points_mask.lo = ~0ULL; // not of 0, sets bits in all 64 spots 
-	all_points_mask.hi = (1ULL << 36) - 1;
+	all_points_mask = ((__uint128_t)1 << 100) - 1; // bits 0–99 set, one per grid point
     
     rows_A = (count_A + 63) / 64;
     rows_B = (count_B + 63) / 64;
@@ -379,13 +354,15 @@ void precomputeDataStructures() {
  * 
  *   - If line_count == order, the solution is complete; only the solution lines themselves are returned (nothing can be parallel to a full covering).
  *
- * @param parallel_indices Output array to write the result indices into. Must be pre-allocated to at least count_A or count_B.
- * @param parallel_count   Running count of indices written (modified in place).
- * @param line_indices     Indices of the solution lines to test parallelism against.
- * @param line_count       Number of solution lines provided.
- * @param is_A             If true, operates on square A candidates; otherwise square B.
+ * @param parallel_indices  Output array to write the result indices into. Must be pre-allocated to at least count_A or count_B.
+ * @param parallel_count    Running count of indices written (modified in place).
+ * @param line_indices      Indices of the solution lines (prepended to output unconditionally).
+ * @param line_count        Number of solution lines provided.
+ * @param total_incidence   Pre-computed union mask of all solution line masks. Avoids redundant mask[index] lookups
+ *                          since the caller already holds the raw masks before the hash lookup.
+ * @param is_A              If true, operates on square A candidates; otherwise square B.
  */
-void getAllParallelLineIndices(int*& parallel_indices, int& parallel_count, const int line_indices[], const int line_count, bool is_A) {
+void getAllParallelLineIndices(int*& parallel_indices, int& parallel_count, const int line_indices[], const int line_count, const __uint128_t& total_incidence, bool is_A) {
     int*        all      = is_A ? all_line_indices_A  : all_line_indices_B;
     const int   all_size = is_A ? count_A             : count_B;
     const auto& masks    = is_A ? cand_masks_A        : cand_masks_B;
@@ -395,22 +372,16 @@ void getAllParallelLineIndices(int*& parallel_indices, int& parallel_count, cons
         parallel_count   = all_size;
         return;
     }
-	
-	for(int i = 0; i < line_count; i++)
-		parallel_indices[parallel_count++] = line_indices[i];
-		
+
+    for(int i = 0; i < line_count; i++)
+        parallel_indices[parallel_count++] = line_indices[i];
+
     if (line_count == order)
         return;
 
-    Mask total_incidence = masks[line_indices[0]];
-	for(int i=1; i < line_count; i++) { // get all points contained in line indices
-		total_incidence.lo |= masks[line_indices[i]].lo;
-		total_incidence.hi |= masks[line_indices[i]].hi;
-	}
-
     for (size_t i = 0; i < masks.size(); i++)
-		if(!linesIntersect(masks[i], total_incidence))
-			parallel_indices[parallel_count++] = i;
+        if(!linesIntersect(masks[i], total_incidence))
+            parallel_indices[parallel_count++] = i;
 }
 
 /**
@@ -486,22 +457,18 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
 
 	if (trans_A < order)
 	{
-		Mask total_incidence_A = cand_masks_A[A_indices[0]];
-		for(int i=1; i < A_count; i++) { // get all points contained in line indices
-			total_incidence_A.lo |= cand_masks_A[A_indices[i]].lo;
-			total_incidence_A.hi |= cand_masks_A[A_indices[i]].hi;
-		} 
+		__uint128_t total_incidence_A = cand_masks_A[A_indices[0]];
+		for(int i=1; i < A_count; i++) // get all points contained in line indices
+			total_incidence_A |= cand_masks_A[A_indices[i]];
 		if(total_incidence_A != all_points_mask) // return immedately if not covering all points
 			return -1;
 	}
 
 	if (trans_B < order)
 	{
-		Mask total_incidence_B = cand_masks_B[B_indices[0]];
-		for(int i=1; i < B_count; i++) {
-			total_incidence_B.lo |= cand_masks_B[B_indices[i]].lo;
-			total_incidence_B.hi |= cand_masks_B[B_indices[i]].hi;
-		} 
+		__uint128_t total_incidence_B = cand_masks_B[B_indices[0]];
+		for(int i=1; i < B_count; i++)
+			total_incidence_B |= cand_masks_B[B_indices[i]];
 		if(total_incidence_B != all_points_mask)
 			return -1;
 	}
@@ -542,8 +509,8 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
  
         for (int i = 0; i < A_count; i++) {
             const int var = i + 1; // SAT variable for this candidate (1-based)
-            uint64_t lo = cand_masks_A[A_indices[i]].lo; // bits 0–63: represent grid points 0–63
-            uint64_t hi = cand_masks_A[A_indices[i]].hi; // bits 0–35: represent grid points 64–99
+            uint64_t lo = (uint64_t)cand_masks_A[A_indices[i]];        // bits 0–63: grid points 0–63
+            uint64_t hi = (uint64_t)(cand_masks_A[A_indices[i]] >> 64); // bits 0–35: grid points 64–99
             while (lo) { 
 				int b = __builtin_ctzll(lo); // count trailing zeros = index of the lowest set bit = covered point index
 				buf_point[buf_len] = b; 	 // record which point this candidate covers
@@ -590,8 +557,8 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
  
         for (int i = 0; i < B_count; i++) {
             const int var = i + 1 + A_count;
-            uint64_t lo = cand_masks_B[B_indices[i]].lo;
-            uint64_t hi = cand_masks_B[B_indices[i]].hi;
+            uint64_t lo = (uint64_t)cand_masks_B[B_indices[i]];
+            uint64_t hi = (uint64_t)(cand_masks_B[B_indices[i]] >> 64);
             while (lo) { 
 				int b = __builtin_ctzll(lo); 
 				buf_point[buf_len] = b;      
@@ -693,9 +660,9 @@ int processLine(string& line)
 #endif 
 	if (line.empty()) 
 		return 0;
-	if (line.back() == '0') {
+	if (line.back() == '0')
 		line.pop_back();
-	}
+
 	istringstream iss(line);
 	int solution[order * order];
 	int solution_count = 0;
@@ -716,9 +683,9 @@ int processLine(string& line)
 	auto conversion_time = chrono::steady_clock::now();
 #endif 
 
-	Mask A_sol_lines[order];
+	__uint128_t A_sol_lines[order];
 	int trans_A = 0;
-	Mask B_sol_lines[order];
+	__uint128_t B_sol_lines[order];
 	int trans_B = 0;
 
 	solutionToCandidateLines(solution, solution_count, A_sol_lines, trans_A, B_sol_lines, trans_B);
@@ -727,14 +694,22 @@ int processLine(string& line)
 	double elapsed_1 = chrono::duration<double>(chrono::steady_clock::now() - conversion_time).count();
 	auto index_time = chrono::steady_clock::now();
 #endif
+
+	// Build total_incidence directly from raw solution masks
+	__uint128_t total_incidence_A = 0;
+	__uint128_t total_incidence_B = 0;
 	
-	// Convert solution lines to their candidate line indices
+	// Convert solution lines to their candidate line indices and compute incidence strings
 	int A_sol_indices[trans_A];
 	int B_sol_indices[trans_B];
-	for (int i = 0; i < trans_A; i++)
+	for (int i = 0; i < trans_A; i++) {
 		A_sol_indices[i] = cand_hash_A[A_sol_lines[i]];
-	for (int i = 0; i < trans_B; i++)
+		total_incidence_A |= A_sol_lines[i];
+	}
+	for (int i = 0; i < trans_B; i++) {
 		B_sol_indices[i] = cand_hash_B[B_sol_lines[i]];
+		total_incidence_B |= B_sol_lines[i];
+	}
 
 #if TRACK_TIME == 1
 	double elapsed_index = chrono::duration<double>(chrono::steady_clock::now() - index_time).count();
@@ -746,8 +721,8 @@ int processLine(string& line)
 	int* parallel_B_indices = (int*)alloca(count_B * sizeof(int));
 	int  parallel_B_count = 0;
 
-	getAllParallelLineIndices(parallel_A_indices, parallel_A_count, A_sol_indices, trans_A, true);
-	getAllParallelLineIndices(parallel_B_indices, parallel_B_count, B_sol_indices, trans_B, false);
+	getAllParallelLineIndices(parallel_A_indices, parallel_A_count, A_sol_indices, trans_A, total_incidence_A, true);
+	getAllParallelLineIndices(parallel_B_indices, parallel_B_count, B_sol_indices, trans_B, total_incidence_B, false);
 
 #if TRACK_TIME == 1
 	double elapsed_2 = chrono::duration<double>(chrono::steady_clock::now() - parallel_time).count();
@@ -932,3 +907,11 @@ int main(int argc, char* argv[]) {
 
 	return 0;
 }
+
+/*
+Possible TODO list:
+1. see if their is a faster way to read files than ifstream 
+	(maybe there is a special one for single core mode where it doesn't save anything to memory? would need to check if memory is even an issue.)
+
+cd /mnt/g/Code/sat\ solver\ stuff/library/
+*/
