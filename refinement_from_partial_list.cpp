@@ -996,11 +996,3 @@ int main(int argc, char* argv[]) {
 
 	return 0;
 }
-
-/* 
-Possible TODO list:
-1. see if their is a faster way to read files than ifstream 
-	(nmap? need to check timings more to see if its actually an issue.)
-
-cd /mnt/g/Code/sat\ solver\ stuff/library/
-*/
