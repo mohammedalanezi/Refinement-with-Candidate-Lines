@@ -8,6 +8,10 @@
 #include <chrono>
 #include <algorithm>
 
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <cstdlib>
 
 #include "cadical.hpp"
@@ -687,8 +691,10 @@ int processLine(string& line)
 	if (line.back() == '0')
 		line.pop_back();
 
-	int solution[order * order];
-	int solution_count = 0;const char* p = line.c_str();
+	int solution[2 * order * order];
+	int solution_count = 0;
+
+	const char* p = line.c_str();
 	const char* end = p + line.size();
 	while (p < end) {
 		while (p < end && (*p == ' ' || *p == '\t')) p++; // skip whitespace
@@ -808,42 +814,51 @@ int main(int argc, char* argv[]) {
 	
 	cout << "Precomputing all data structures..." << endl;
 	precomputeDataStructures();
-
-	ifstream sol_stream(solution_file);
-	if (!sol_stream) {
-		cerr << "Cannot open solution file: " << solution_file << endl;
-		return 1;
-	}
 	
 	long long total_refinements = 0;
 
 	unordered_set<size_t> seen;
 	seen.reserve(2000000);
+
+	int fd = open(solution_file.c_str(), O_RDONLY);
+	if (fd < 0) { cerr << "Cannot open: " << solution_file << "\n"; return 1; }
+	struct stat sb;
+	fstat(fd, &sb);
+	size_t file_size = sb.st_size;
+	const char* data = (const char*)mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
+	close(fd);
+	madvise((void*)data, file_size, MADV_SEQUENTIAL); // hint to kernel: read ahead
+
+	const char* p   = data;
+	const char* end = data + file_size;
 	
 	start_time = chrono::steady_clock::now();
 	#if ENABLE_MT == 0
-		string line;
-		while (true) {
+		while (p < end) {
 			#if TRACK_TIME == 1
 			auto stream_time = chrono::steady_clock::now();
 			#endif
-			bool got_line = (bool)getline(sol_stream, line);
+			const char* nl = (const char*)memchr(p, '\n', end - p);
+			const char* line_end = nl ? nl : end;
+			size_t len = line_end - p; 
+			if (len > 0 && p[len-1] == '\r') len--; // trim trailing \r for Windows line endings
 			#if TRACK_TIME == 1
 			total_stream_read_time += chrono::duration<double>(chrono::steady_clock::now() - stream_time).count();
 			#endif
-			if (!got_line) break;
-			if (!line.empty()) {
+
+			if (len > 0) {
 				#if TRACK_TIME == 1
 				auto hash_time = chrono::steady_clock::now();
 				#endif
-				size_t h = 14695981039346656037ULL; // FNV-1a hash
-				for (unsigned char c : line) 
-					h = (h ^ c) * 1099511628211ULL;
+				size_t h = 14695981039346656037ULL; // hash inline — no string allocation at all
+				for (size_t i = 0; i < len; i++)
+					h = (h ^ (unsigned char)p[i]) * 1099511628211ULL;
 				bool is_new = seen.insert(h).second;
 				#if TRACK_TIME == 1
 				total_hash_dedup_time += chrono::duration<double>(chrono::steady_clock::now() - hash_time).count();
 				#endif
 				if (is_new) {
+					string line(p, len);
 					long int refinement_count = processLine(line); 
 					if(refinement_count > 0)
 						total_refinements += refinement_count;
@@ -858,43 +873,47 @@ int main(int argc, char* argv[]) {
 						break;
 				}
 			}
+    		p = nl ? nl + 1 : end;
 		}
-		sol_stream.close();
+		munmap((void*)data, file_size);
 		cout << "\n";
 	#else
-		vector<string> all_solution_lines;
-		all_solution_lines.reserve(1500000);
+		struct LineInfo { const char* start; size_t len; };
+		vector<LineInfo> unique_lines;
+		unique_lines.reserve(1500000);
 		
-		string line;
-		while (true) {
+		while (p < end) {
 			#if TRACK_TIME == 1
-			auto t_stream = chrono::steady_clock::now();
+			auto stream_time = chrono::steady_clock::now();
 			#endif
-			bool got_line = (bool)getline(sol_stream, line);
+			const char* nl = (const char*)memchr(p, '\n', end - p);
+			const char* line_end = nl ? nl : end;
+			size_t len = line_end - p;
+			if (len > 0 && p[len-1] == '\r') len--;   // trim CR
 			#if TRACK_TIME == 1
-			total_stream_read_time += chrono::duration<double>(chrono::steady_clock::now() - t_stream).count();
+			total_stream_read_time += chrono::duration<double>(chrono::steady_clock::now() - stream_time).count();
 			#endif
-			if (!got_line) break;
-			if (!line.empty()) {
+
+			if (len > 0) {
 				#if TRACK_TIME == 1
-				auto t_hash = chrono::steady_clock::now();
+				auto hash_time = chrono::steady_clock::now();
 				#endif
-				size_t h = 14695981039346656037ULL;
-				for (unsigned char c : line)
-					h = (h ^ c) * 1099511628211ULL;
+				size_t h = 14695981039346656037ULL; // FNV‑1a hash
+				for (size_t i = 0; i < len; ++i)
+					h = (h ^ (unsigned char)p[i]) * 1099511628211ULL;
 				bool is_new = seen.insert(h).second;
 				#if TRACK_TIME == 1
-				total_hash_dedup_time += chrono::duration<double>(chrono::steady_clock::now() - t_hash).count();
+				total_hash_dedup_time += chrono::duration<double>(chrono::steady_clock::now() - hash_time).count();
 				#endif
-				if (is_new)
-					all_solution_lines.push_back(move(line));
+				if (is_new) {
+					unique_lines.push_back({p, len});
+				}
 			}
+			p = nl ? nl + 1 : end;
 		}
-		sol_stream.close();
-		seen = unordered_set<size_t>(); // free memory; hashes no longer needed
 		
-		cout << "Loaded " << all_solution_lines.size() << " solutions to process.\n"; // show add a timer for this to display how long this took
-		
+		cout << "Loaded " << unique_lines.size() << " solutions to process.\n"; // show add a timer for this to display how long this took
+			
 		atomic<bool> abort_early(false);
 
 		auto max_threads = omp_get_max_threads();
@@ -905,9 +924,10 @@ int main(int argc, char* argv[]) {
 		
 		start_time = chrono::steady_clock::now();
 		#pragma omp parallel for schedule(dynamic)
-		for (size_t sol_idx = 0; sol_idx < all_solution_lines.size(); sol_idx++)
+		for (size_t sol_idx = 0; sol_idx < unique_lines.size(); sol_idx++)
 			if (!abort_early) {
-				string& line = all_solution_lines[sol_idx];
+        		const LineInfo& li = unique_lines[sol_idx];
+        		string line(li.start, li.len);          // copy to mutable string
 				long int refinement_count = processLine(line); 
 				if (refinement_count > 0) {
 					#pragma omp atomic
