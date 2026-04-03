@@ -3,7 +3,9 @@ CXX = g++
 TARGET = refinement_from_partial_list
 TARGET_ASAN = $(TARGET)_asan
 TARGET_MULTI = $(TARGET)_mt
-SRC = refinement_from_partial_list.cpp
+TARGET_ASSUME = $(TARGET)_assumption
+SRC = $(TARGET).cpp
+SRC_ASSUME = $(TARGET)_assumption.cpp
 
 # Include directories
 INCLUDES = -I../cadical-exhaust-master/src -I. -I$(EXACTDIR)
@@ -16,7 +18,7 @@ MULTI_THREAD  = -pthread -fopenmp
 LDFLAGS_BASE = ../cadical-exhaust-master/build/libcadical.a
 
 # ===== Release build (for benchmarking) =====
-CXXFLAGS_RELEASE = -O3 -march=native -DNDEBUG
+CXXFLAGS_RELEASE = -O3 -DNDEBUG
 LDFLAGS_RELEASE  =
 
 # ===== ASan build (for testing) =====
@@ -33,6 +35,10 @@ single:
 multi:
 	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o $(TARGET_MULTI) $(SRC) \
 	$(MULTI_THREAD) $(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
+
+assume:
+	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o $(TARGET_ASSUME) $(SRC_ASSUME) \
+	$(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
 
 asan:
 	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_ASAN) -o $(TARGET_ASAN) $(SRC) \
