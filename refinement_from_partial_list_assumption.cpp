@@ -558,17 +558,15 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_sol_line
         for (int j = 0; j < count_B; j++) {
             // Check if j is one of the fixed B lines
             bool is_fixed = false;
-            for (int k = 0; k < trans_B; k++) {
-                if (B_indices[k] == j) {
-                    is_fixed = true;
-                    break;
-                }
-            }
-            if (is_fixed)
-                continue;
+			for (int k = 0; k < trans_B; k++)
+				if (B_indices[k] == j) {
+					is_fixed = true;
+					break;
+				}
             // Test the bit in the computed result
-            if (!((result[j / 64] >> (j % 64)) & 1))
-                solver.assume(-(j + 1));
+			int idx = j + 1;
+            if (!is_fixed && !((result[idx / 64] >> (idx % 64)) & 1))
+                solver.assume(-idx);
         }
     } 
 
