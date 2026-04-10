@@ -7,7 +7,6 @@
 #include <tuple>
 #include <chrono>
 #include <algorithm>
-#include <thread>
 
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -34,6 +33,33 @@
 #define MAX_PARTIAL_SOLUTIONS 2000 // a value below or equal 0 runs all partial solutions
 
 using namespace std;
+
+struct ClauseChecker : public CaDiCaL::ClauseIterator {
+    const vector<int>& assignment; // positive = true, negative = false (1-based var indices)
+    int violated = 0;
+    int max_lit = 0;
+
+    ClauseChecker(const vector<int>& a, int maximum) : assignment(a), max_lit(maximum) {}
+
+    bool clause(const vector<int>& c) override {
+        for (int lit : c) // skip clauses with literals outside our range
+            if (abs(lit) > max_lit) 
+				return true;
+
+        for (int lit : c) {
+            int var = abs(lit);
+            bool val = (find(assignment.begin(), assignment.end(), var) != assignment.end());
+            if (lit < 0) val = !val;
+            if (val) return true; // clause satisfied, move on
+        }
+        // no literal satisfied
+        violated++;
+        cerr << "[VIOLATED CLAUSE] ";
+        for (int lit : c) cerr << lit << " ";
+        cerr << "0\n";
+        return true; // keep iterating
+    }
+};
 
 // Global data structures
 const int order = 10;
@@ -183,6 +209,11 @@ vector<int> parse_line(const string& line, char prefix) {
 	while (iss >> val) 
 		result.push_back(val);
 	return result;
+}
+
+unsigned int __builtin_popcountll_128(__uint128_t n) {
+    return __builtin_popcountll((unsigned long long)n) + 
+           __builtin_popcountll((unsigned long long)(n >> 64));
 }
 
 /**
@@ -402,17 +433,14 @@ void precomputeDataStructures() {
 		var_lookup[var] = { (int8_t)sq, (int8_t)r, (int8_t)c, (int8_t)s };
 	}
 	
-	for(int i = 0; i < count_B; i++)
-		observed.push_back(i+1);
-
 	vector<int> lines_through_points[order * order];
 		
-	for (int p = 0; p < order * order; p++) {
-		for (size_t i = 0; i < count_B; i++) {
-			const __uint128_t& m = cand_masks_B[i];  
+	for (size_t i = 0; i < count_B; i++) {
+		const __uint128_t& m = cand_masks_B[i];  
+		observed.push_back(i + 1);
+		for (int p = 0; p < order * order; p++)
 			if (mask_isSet(m, p))
 				lines_through_points[p].push_back(i + 1);
-		}
 	}
 
 	int var_count = count_B;
@@ -445,10 +473,10 @@ bool verify_b_solution(const vector<int>& b_vars, __uint128_t a_lines[]) {
             return false;
         }
         __uint128_t m = cand_masks_B[idx];
-		for(int i=0; i < 10; i++)
+		for(int i=0; i < order; i++)
 			if (!intersectsExactlyOnce(a_lines[i], m))
 			{
-				cerr << "[VERIFY FAIL] B line " << v << " intersects more than or less than once with A square\n";
+				cerr << "[VERIFY FAIL] B line " << v << " intersects exactly " << __builtin_popcountll_128(a_lines[i] & m) << " times, not once, with A square\n";
 				mask_print(a_lines[i]);
 				mask_print(m);
 				return false;
@@ -474,81 +502,26 @@ bool verify_b_solution(const vector<int>& b_vars, __uint128_t a_lines[]) {
     return true;
 }
 
-struct CaptureResult {
-	int solutions_checked = 0;
-	int solutions_invalid = 0;
-};
+int get_refinements(const int& trans_A, const int& trans_B, const int A_sol_lines[], const int B_sol_lines[], __uint128_t A_masks[]) {
+	vector<int> allowed;
+	vector<int> disallowed;
 
-/**
- * @brief Redirects stdout at the fd level into a pipe, tees output back to the real
- * terminal in real time, then parses and verifies every "c New solution:" line.
- * Works for printf, cout, or any other stdout output from the propagator.
- */
-static CaptureResult capture_and_verify_solve(CaDiCaL::Solver& s, long int& sol_count_out, ExhaustiveSearch& propagator, __uint128_t a_vars[]) {
-	int saved_stdout = dup(STDOUT_FILENO);
-	int pipefd[2];
-	pipe(pipefd);
-
-	cout.flush();
-	fflush(stdout);
-	dup2(pipefd[1], STDOUT_FILENO);
-	close(pipefd[1]);
-
-	CaptureResult result;
-	string captured;
-	thread tee([&]() {
-		char buf[4096];
-		ssize_t n;
-		while ((n = read(pipefd[0], buf, sizeof(buf))) > 0) {
-			write(saved_stdout, buf, n);
-			captured.append(buf, n);
-		}
-	});
-
-	s.solve();
-	sol_count_out = propagator.get_solution_count();
-
-	fflush(stdout);
-	dup2(saved_stdout, STDOUT_FILENO);
-	close(saved_stdout);
-	close(pipefd[0]);
-	tee.join();
-	cout.clear();
-
-	const string prefix = "c New solution:";
-	istringstream stream(captured);
-	string line;
-	while (getline(stream, line)) {
-		if (line.rfind(prefix, 0) != 0) continue;
-		++result.solutions_checked;
-		istringstream iss(line.substr(prefix.size()));
-		vector<int> b_vars;
-		int v;
-		while (iss >> v)
-			if (v > 0 && v <= count_B)
-				b_vars.push_back(v);
-		if (!verify_b_solution(b_vars, a_vars))
-			++result.solutions_invalid;
-	}
-
-	return result;
-}
-
-int get_refinements(const int& trans_A, const int& trans_B, const int A_sol_lines[], const int B_indices[], __uint128_t A_masks[]) {
-    // 1. Assume the B lines that are already fixed in the partial solution
+    __uint128_t total_incidence = 0;
+	
+	// 1. Assume the B lines that are already fixed in the partial solution
     for (int i = 0; i < trans_B; i++)
-        solver.assume(B_indices[i] + 1);
+        solver.assume(B_sol_lines[i] + 1);
 #if TRACK_TIME == 1
 	auto timer = chrono::steady_clock::now();
 #endif
     // 2. If there are any A lines, filter the remaining B lines using the precomputed bitset
-    if (trans_A > 0) {
+    if (trans_A > 0 && trans_B < order) {
         // Allocate a bitset covering all B lines, initially all ones
         uint64_t* result = (uint64_t*)alloca(rows_B * sizeof(uint64_t));
-        memset(result, 0xFF, rows_B * sizeof(uint64_t));
-
+        memcpy(result, intersects_once_BA + (long long)A_sol_lines[0] * rows_B, rows_B * sizeof(uint64_t));
+        
         // Intersect the rows of intersects_once_BA for each A line
-        for (int i = 0; i < trans_A; i++) {
+        for (int i = 1; i < trans_A; i++) {
             const uint64_t* row = intersects_once_BA + (long long)A_sol_lines[i] * rows_B;
             for (int w = 0; w < rows_B; w++)
                 result[w] &= row[w];
@@ -559,40 +532,59 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_sol_line
             // Check if j is one of the fixed B lines
             bool is_fixed = false;
 			for (int k = 0; k < trans_B; k++)
-				if (B_indices[k] == j) {
+				if (B_sol_lines[k] == j) {
 					is_fixed = true;
 					break;
 				}
             // Test the bit in the computed result
-			int idx = j + 1;
-            if (!is_fixed && !((result[idx / 64] >> (idx % 64)) & 1))
-                solver.assume(-idx);
-        }
-    } 
+            if (is_fixed || (result[j / 64] >> (j % 64)) & 1)
+			{
+				allowed.push_back(j+1);
+				total_incidence |= cand_masks_B[j];
+			}
+			else {
+				disallowed.push_back(j+1);
+		    	solver.assume(-(j + 1));
+			}
+		}
+    }
 
+	if (trans_B < order && total_incidence != all_points_mask)
+		return -1;
+	
 #if TRACK_TIME == 1
 	double elapsed_3 = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 	total_line_intersection_time += elapsed_3;
 	timer = chrono::steady_clock::now();
 #endif
 
-    ExhaustiveSearch propagator(&solver, observed, true, nullptr, false);
+    ExhaustiveSearch propagator(&solver, observed, true, nullptr, false, true);
 
-	long int sol_count = 0;
-#if VERIFY_SOLUTION == 1
-	CaptureResult verify = capture_and_verify_solve(solver, sol_count, propagator, A_masks);
-    int valid = verify.solutions_checked - verify.solutions_invalid;
-    if (verify.solutions_checked == 0 && sol_count > 0)
-        cerr << "[VERIFY] WARNING: " << sol_count << " solution(s) counted but 0 'c New solution:' lines intercepted.\n";
-    else if (verify.solutions_checked > 0) {
-        cerr << "[VERIFY] " << valid << "/" << verify.solutions_checked << " solutions valid";
-        if (verify.solutions_invalid > 0)
-            cerr << " -- " << verify.solutions_invalid << " INVALID!";
-        cerr << "\n";
-    }
-#else
 	solver.solve();
-	sol_count = propagator.get_solution_count();
+	long int sol_count = propagator.get_solution_count();
+
+#if VERIFY_SOLUTION == 1
+	int invalid = 0;
+	for (const auto& local_vars : propagator.get_solutions()) {
+		// local_vars contains the 1-based B line variable indices that are true in this solution
+		vector<int> b_vars;
+		for (int v : local_vars)
+		{
+			if (std::find(disallowed.begin(), disallowed.end(), v) != disallowed.end())
+				cout << v << " should not be in the solution!" << endl;
+			if (v > 0 && v <= count_B)
+				b_vars.push_back(v);
+			}
+		if (!verify_b_solution(b_vars, A_masks))
+			invalid++;
+	}
+	if (sol_count > 0) {
+		int valid = (int)sol_count - invalid;
+		cerr << "[VERIFY] " << valid << "/" << sol_count << " solutions valid";
+		if (invalid > 0)
+			cerr << " -- " << invalid << " INVALID!";
+		cerr << "\n";
+	}
 #endif
 
 #if TRACK_TIME == 1
@@ -695,6 +687,50 @@ int main(int argc, char* argv[]) {
 	
 	cout << "Precomputing all data structures..." << endl;
 	precomputeDataStructures();
+
+	/*
+	int solution[] = {9, 97, 172, 246, 2784, 4955, 7505, 12039, 12970, 14425};
+	int sol_size = sizeof(solution) / sizeof(solution[0]);
+	int sol_ptr = 0; // Tracks our current position in the solution array
+	
+	vector<int> hyp;
+	hyp.reserve(count_B);
+	
+	for (int j = 0; j < count_B; j++) {
+		int current_val = j + 1;
+		bool selected = false;
+
+		// If the current j+1 matches the next value in our solution array
+		if (sol_ptr < sol_size && current_val == solution[sol_ptr]) {
+			selected = true;
+			sol_ptr++; // Move to the next expected value in the solution
+		}
+
+		hyp.push_back(selected ? current_val : -current_val);
+	}
+	ClauseChecker checker(hyp, count_B);
+	solver.traverse_clauses(checker);
+
+    for (int j = 0; j < count_B; j++) {
+        int var = j + 1;
+        bool selected = false;
+        for (int k = 0; k < sol_size; k++)
+            if (solution[k] == var) { 
+				selected = true; 
+				break; 
+			}
+        solver.clause(selected ? var : -var);
+    }
+
+    int result = solver.solve();
+    if (result == 10) // SATISFIABLE
+        cerr << "[VERIFY] Encoding accepts the known solution, encoding is correct\n";
+    else if (result == 20) // UNSATISFIABLE
+        cerr << "[VERIFY] Encoding REJECTS the known solution, encoding bug exists\n";
+    else
+        cerr << "[VERIFY] Unexpected result: " << result << "\n";
+
+	return 0;*/
 	
 	long long total_refinements = 0;
 
