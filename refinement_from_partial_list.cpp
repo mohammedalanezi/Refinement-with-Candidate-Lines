@@ -25,9 +25,11 @@
 #define ENABLE_MT 0
 #endif
 
+#define OUTPUT_SOLUTIONS 1
 #define TRACK_TIME 1
 #define PRINT_TIME 0
 #define MAX_RUNTIME 0 // a value below or equal to 0 skips timeout
+#define MAX_PARTIAL_SOLUTIONS 2000 // a value below or equal 0 runs all partial solutions
 
 using namespace std;
 
@@ -268,7 +270,6 @@ void solutionToCandidateLines(const int* solution, const int& solution_count, __
 			points_by_symbol[v.sq][v.s][cnt++] = point;
 	}
 
-
 	for (int sq = 0; sq < 2; ++sq)
 		for (int s = 0; s < order; ++s)
             if (counts[sq][s] == order) {
@@ -449,9 +450,48 @@ void getIntersectingLineIndices(int intersecting_indices[], int& intersection_co
     for (int i = 0; i < line_count; i++) {
         const int idx = line_indices[i];
         if ((result[idx / 64] >> (idx % 64)) & 1)
-            intersecting_indices[intersection_count++] = idx;
+			intersecting_indices[intersection_count++] = idx;
     }
 }
+
+#if OUTPUT_SOLUTIONS
+/**
+ * @brief Maps local SAT variable indices from a solution back to global candidate line indices.
+ *
+ * Local SAT vars are 1..A_count for A lines and A_count+1..A_count+B_count for B lines.
+ * Each maps back through A_indices[]/B_indices[] to a 0-based index into cand_masks_A/B.
+ *
+ * @param local_vars  Positive SAT vars from one ExhaustiveSearch solution.
+ * @param A_indices   Filtered A candidate indices passed into get_refinements.
+ * @param A_count     Number of A candidates.
+ * @param B_indices   Filtered B candidate indices passed into get_refinements.
+ * @param B_count     Number of B candidates.
+ * @param global_A    Output: 0-based indices into cand_masks_A for the chosen A lines.
+ * @param global_B    Output: 0-based indices into cand_masks_B for the chosen B lines.
+ */
+void mapSolutionToGlobalIndices(
+    const vector<int>& local_vars,
+    const int* A_indices, int A_count,
+    const int* B_indices, int B_count,
+    vector<int>& global_A,
+    vector<int>& global_B)
+{
+	cout << A_count << " " << B_count << endl;
+    for (int v : local_vars) {
+		cout << v << " ";
+        if (v <= 0) continue;
+        if (v <= A_count) {
+            global_A.push_back(A_indices[v - 1]);
+        } else if (v <= A_count + B_count) {
+            global_B.push_back(B_indices[v - A_count - 1]);
+        } else {
+            cerr << "[MAP] var " << v << " out of range (A_count=" 
+                 << A_count << " B_count=" << B_count << ")\n";
+        }
+    }
+	cout << endl;
+}
+#endif
 
 /**
  * @brief Counts valid refinements using exhaustive SAT solving.
@@ -643,10 +683,25 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
 	timer = chrono::steady_clock::now();
 #endif
 
-    ExhaustiveSearch propagator(&solver, observed, true, nullptr, false);	
+    ExhaustiveSearch propagator(&solver, observed, true, nullptr, false, OUTPUT_SOLUTIONS);	
 
     int result = solver.solve();
     long int sol_count = propagator.get_solution_count();
+
+	#if OUTPUT_SOLUTIONS
+	for (const auto& local_vars : propagator.get_solutions()) {
+		vector<int> global_A, global_B;
+		mapSolutionToGlobalIndices(local_vars, A_indices, A_count, B_indices, B_count, global_A, global_B);
+		
+		// global_A and global_B are now 0-based indices into cand_masks_A / cand_masks_B
+		// e.g. print them, write to file, accumulate, etc.
+		cerr << "[" << partial_count << " SOL] A:";
+		for (int idx : global_A) cerr << " " << (idx + 1); // 1-based for display
+		cerr << ",  B:";
+		for (int idx : global_B) cerr << " " << (idx + 1);
+		cerr << "\n";
+	}
+	#endif
     
 #if TRACK_TIME == 1
     double solver_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
@@ -871,6 +926,8 @@ int main(int argc, char* argv[]) {
 					}
 					if(MAX_RUNTIME > 0 && MAX_RUNTIME < chrono::duration<double>(chrono::steady_clock::now() - start_time).count())
 						break;
+					if(MAX_PARTIAL_SOLUTIONS > 0 && partial_count > MAX_PARTIAL_SOLUTIONS)
+						break;
 				}
 			}
     		p = nl ? nl + 1 : end;
@@ -948,6 +1005,8 @@ int main(int argc, char* argv[]) {
 				}
 				if(MAX_RUNTIME > 0 && MAX_RUNTIME < chrono::duration<double>(chrono::steady_clock::now() - start_time).count())
 					abort_early = true;
+				if(MAX_PARTIAL_SOLUTIONS > 0 && partial_count > MAX_PARTIAL_SOLUTIONS)
+					abort_early = true;
 			}
 		cout << "\n(" << curr_threads << " THREADS)\n";
 	#endif
@@ -992,6 +1051,10 @@ int main(int argc, char* argv[]) {
 
 #if MAX_RUNTIME > 0
 	cout << "\nMax Runtime: " << MAX_RUNTIME << " seconds\n";
+#endif
+
+#if MAX_PARTIAL_SOLUTIONS > 0
+	cout << "\nMax Partial Solutions: " << MAX_PARTIAL_SOLUTIONS << " seconds\n";
 #endif
 
 	return 0;
