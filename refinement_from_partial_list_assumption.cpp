@@ -3,6 +3,8 @@
 #include <sstream>
 #include <vector>
 #include <unordered_set>
+#include <unordered_map>
+#include <cstring>
 #include <string>
 #include <tuple>
 #include <chrono>
@@ -16,14 +18,6 @@
 
 #include "cadical.hpp"
 #include "exhaustive.hpp"
-
-#ifdef _OPENMP
-#define ENABLE_MT 1
-#include <omp.h>
-#include <atomic>
-#else
-#define ENABLE_MT 0
-#endif
 
 #define VERIFY_SOLUTION 1
 
@@ -66,6 +60,7 @@ const int order = 10;
 
 static vector<int> observed;
 static CaDiCaL::Solver solver;
+static ExhaustiveSearch* global_propagator = nullptr;
 
 unordered_set<int> points_A;
 unordered_set<int> points_B;
@@ -310,9 +305,9 @@ void solutionToCandidateLines(const int* solution, const int& solution_count, __
             }
 }
 
-static void encode_exactly_min_max(CaDiCaL::Solver &solver, vector<int> &var_list, int min, int max, int &var_cnt)
+static void encode_exactly_min_max(CaDiCaL::Solver &solver, vector<int> &var_list, int min, int max)
 {
-    int n = var_list.size();
+	int n = var_list.size();
     int k = max + 1;          // we need s[i][0] ... s[i][max+1]
     int l = min;
 
@@ -321,7 +316,7 @@ static void encode_exactly_min_max(CaDiCaL::Solver &solver, vector<int> &var_lis
     for (int i = 0; i < n + 1; i++) {
         s.push_back(vector<int>());
         for (int j = 0; j < k + 1; j++)
-            s[i].push_back(++var_cnt);
+            s[i].push_back(solver.declare_one_more_variable());
     }
 
     // s[i][0] is always true
@@ -432,9 +427,8 @@ void precomputeDataStructures() {
 		auto [sq, r, c, s] = indexTo4Tuple(var, 2, order, order, order);
 		var_lookup[var] = { (int8_t)sq, (int8_t)r, (int8_t)c, (int8_t)s };
 	}
-	
+
 	vector<int> lines_through_points[order * order];
-		
 	for (size_t i = 0; i < count_B; i++) {
 		const __uint128_t& m = cand_masks_B[i];  
 		observed.push_back(i + 1);
@@ -443,10 +437,16 @@ void precomputeDataStructures() {
 				lines_through_points[p].push_back(i + 1);
 	}
 
-	int var_count = count_B;
+	solver.set_long_option("--log"); 
+	solver.resize(count_B);
 	for(int i = 0; i < order * order; i++)
-		encode_exactly_min_max(solver, lines_through_points[i], 1, 1, var_count);
+		encode_exactly_min_max(solver, lines_through_points[i], 1, 1);
 
+    static ExhaustiveSearch propagator(&solver, observed, true, nullptr, false, true); 
+    global_propagator = &propagator; 
+	for(int i =0; i < count_B; i++)
+		solver.add_observed_var(i+1);
+	
 	auto end = chrono::steady_clock::now(); 
 	double elapsed = chrono::duration<double>(end - start).count();
     cout << "Precomputed SAT Instance using masks in " << elapsed << " seconds." << endl;
@@ -508,6 +508,7 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_sol_line
 
     __uint128_t total_incidence = 0;
 	
+	solver.reset_assumptions();
 	// 1. Assume the B lines that are already fixed in the partial solution
     for (int i = 0; i < trans_B; i++)
         solver.assume(B_sol_lines[i] + 1);
@@ -550,22 +551,40 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_sol_line
     }
 
 	if (trans_B < order && total_incidence != all_points_mask)
+	{
 		return -1;
+	}
 	
 #if TRACK_TIME == 1
 	double elapsed_3 = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 	total_line_intersection_time += elapsed_3;
 	timer = chrono::steady_clock::now();
 #endif
+	
+	global_propagator->clear_solutions();
+	int res = solver.propagate();
+	int sol_count = global_propagator->get_solution_count();
+	cout << partial_count << ": " << res << endl;
 
-    ExhaustiveSearch propagator(&solver, observed, true, nullptr, false, true);
+	if(res == 10)
+	{	
+		std::cout << " (model: [";
 
-	solver.solve();
-	long int sol_count = propagator.get_solution_count();
+		std::vector<int> model;
+		for (int idx = 1; idx <= count_B; idx++) {
+			int lit = solver.val (idx);
+			model.push_back (lit);
+			if(lit > 0)
+				std::cout << " " << lit;
+		}
+		std::cout << " ])" << std::endl;
+		cout << "SAT" << endl;
+		sol_count++;
+	}
 
 #if VERIFY_SOLUTION == 1
 	int invalid = 0;
-	for (const auto& local_vars : propagator.get_solutions()) {
+	for (const auto& local_vars : global_propagator->get_solutions()) {
 		// local_vars contains the 1-based B line variable indices that are true in this solution
 		vector<int> b_vars;
 		for (int v : local_vars)
@@ -613,12 +632,7 @@ int processLine(string& line)
 		if (x != 0) 
 			solution[solution_count++] = x;
 
-	#if ENABLE_MT == 1
-	#pragma omp atomic
 	++partial_count;
-	#else
-	++partial_count;
-	#endif
 	
 #if TRACK_TIME == 1
 	double elapsed_0 = chrono::duration<double>(chrono::steady_clock::now() - read_time).count();
@@ -688,50 +702,6 @@ int main(int argc, char* argv[]) {
 	cout << "Precomputing all data structures..." << endl;
 	precomputeDataStructures();
 
-	/*
-	int solution[] = {9, 97, 172, 246, 2784, 4955, 7505, 12039, 12970, 14425};
-	int sol_size = sizeof(solution) / sizeof(solution[0]);
-	int sol_ptr = 0; // Tracks our current position in the solution array
-	
-	vector<int> hyp;
-	hyp.reserve(count_B);
-	
-	for (int j = 0; j < count_B; j++) {
-		int current_val = j + 1;
-		bool selected = false;
-
-		// If the current j+1 matches the next value in our solution array
-		if (sol_ptr < sol_size && current_val == solution[sol_ptr]) {
-			selected = true;
-			sol_ptr++; // Move to the next expected value in the solution
-		}
-
-		hyp.push_back(selected ? current_val : -current_val);
-	}
-	ClauseChecker checker(hyp, count_B);
-	solver.traverse_clauses(checker);
-
-    for (int j = 0; j < count_B; j++) {
-        int var = j + 1;
-        bool selected = false;
-        for (int k = 0; k < sol_size; k++)
-            if (solution[k] == var) { 
-				selected = true; 
-				break; 
-			}
-        solver.clause(selected ? var : -var);
-    }
-
-    int result = solver.solve();
-    if (result == 10) // SATISFIABLE
-        cerr << "[VERIFY] Encoding accepts the known solution, encoding is correct\n";
-    else if (result == 20) // UNSATISFIABLE
-        cerr << "[VERIFY] Encoding REJECTS the known solution, encoding bug exists\n";
-    else
-        cerr << "[VERIFY] Unexpected result: " << result << "\n";
-
-	return 0;*/
-	
 	long long total_refinements = 0;
 
 	unordered_set<size_t> seen;
@@ -750,126 +720,51 @@ int main(int argc, char* argv[]) {
 	const char* end = data + file_size;
 	
 	start_time = chrono::steady_clock::now();
-	#if ENABLE_MT == 0
-		while (p < end) {
-			#if TRACK_TIME == 1
-			auto stream_time = chrono::steady_clock::now();
-			#endif
-			const char* nl = (const char*)memchr(p, '\n', end - p);
-			const char* line_end = nl ? nl : end;
-			size_t len = line_end - p; 
-			if (len > 0 && p[len-1] == '\r') len--; // trim trailing \r for Windows line endings
-			#if TRACK_TIME == 1
-			total_stream_read_time += chrono::duration<double>(chrono::steady_clock::now() - stream_time).count();
-			#endif
+	while (p < end) {
+		#if TRACK_TIME == 1
+		auto stream_time = chrono::steady_clock::now();
+		#endif
+		const char* nl = (const char*)memchr(p, '\n', end - p);
+		const char* line_end = nl ? nl : end;
+		size_t len = line_end - p; 
+		if (len > 0 && p[len-1] == '\r') len--; // trim trailing \r for Windows line endings
+		#if TRACK_TIME == 1
+		total_stream_read_time += chrono::duration<double>(chrono::steady_clock::now() - stream_time).count();
+		#endif
 
-			if (len > 0) {
-				#if TRACK_TIME == 1
-				auto hash_time = chrono::steady_clock::now();
-				#endif
-				size_t h = 14695981039346656037ULL; // hash inline — no string allocation at all
-				for (size_t i = 0; i < len; i++)
-					h = (h ^ (unsigned char)p[i]) * 1099511628211ULL;
-				bool is_new = seen.insert(h).second;
-				#if TRACK_TIME == 1
-				total_hash_dedup_time += chrono::duration<double>(chrono::steady_clock::now() - hash_time).count();
-				#endif
-				if (is_new) {
-					string line(p, len);
-					long int refinement_count = processLine(line); 
-					if(refinement_count > 0)
-						total_refinements += refinement_count;
-					else if(refinement_count < 0)
-						skipped_partial_solutions += 1;
-					if (partial_count % 1000 == 0) { 
-						auto current_time = chrono::steady_clock::now();
-						double elapsed = chrono::duration<double>(current_time - start_time).count();
-						cout << "Processed " << partial_count << " partial solutions. Time elapsed: " << elapsed << " seconds with total refinements: " << total_refinements << endl;
-					}
-					if(MAX_RUNTIME > 0 && MAX_RUNTIME < chrono::duration<double>(chrono::steady_clock::now() - start_time).count())
-						break;
-					if(MAX_PARTIAL_SOLUTIONS > 0 && partial_count > MAX_PARTIAL_SOLUTIONS)
-						break;
-				}
-			}
-    		p = nl ? nl + 1 : end;
-		}
-		munmap((void*)data, file_size);
-		cout << "\n";
-	#else
-		struct LineInfo { const char* start; size_t len; };
-		vector<LineInfo> unique_lines;
-		unique_lines.reserve(1500000);
-		
-		while (p < end) {
+		if (len > 0) {
 			#if TRACK_TIME == 1
-			auto stream_time = chrono::steady_clock::now();
+			auto hash_time = chrono::steady_clock::now();
 			#endif
-			const char* nl = (const char*)memchr(p, '\n', end - p);
-			const char* line_end = nl ? nl : end;
-			size_t len = line_end - p;
-			if (len > 0 && p[len-1] == '\r') len--;   // trim CR
+			size_t h = 14695981039346656037ULL; // hash inline — no string allocation at all
+			for (size_t i = 0; i < len; i++)
+				h = (h ^ (unsigned char)p[i]) * 1099511628211ULL;
+			bool is_new = seen.insert(h).second;
 			#if TRACK_TIME == 1
-			total_stream_read_time += chrono::duration<double>(chrono::steady_clock::now() - stream_time).count();
+			total_hash_dedup_time += chrono::duration<double>(chrono::steady_clock::now() - hash_time).count();
 			#endif
-
-			if (len > 0) {
-				#if TRACK_TIME == 1
-				auto hash_time = chrono::steady_clock::now();
-				#endif
-				size_t h = 14695981039346656037ULL; // FNV‑1a hash
-				for (size_t i = 0; i < len; ++i)
-					h = (h ^ (unsigned char)p[i]) * 1099511628211ULL;
-				bool is_new = seen.insert(h).second;
-				#if TRACK_TIME == 1
-				total_hash_dedup_time += chrono::duration<double>(chrono::steady_clock::now() - hash_time).count();
-				#endif
-				if (is_new) {
-					unique_lines.push_back({p, len});
-				}
-			}
-			p = nl ? nl + 1 : end;
-		}
-		
-		cout << "Loaded " << unique_lines.size() << " solutions to process.\n"; // show add a timer for this to display how long this took
-			
-		atomic<bool> abort_early(false);
-
-		auto max_threads = omp_get_max_threads();
-		int limit_threads = 2;
-		int curr_threads = max(1, max_threads - limit_threads);
-
-		omp_set_num_threads(curr_threads);
-		
-		start_time = chrono::steady_clock::now();
-		#pragma omp parallel for schedule(dynamic)
-		for (size_t sol_idx = 0; sol_idx < unique_lines.size(); sol_idx++)
-			if (!abort_early) {
-        		const LineInfo& li = unique_lines[sol_idx];
-        		string line(li.start, li.len);          // copy to mutable string
+			if (is_new) {
+				string line(p, len);
 				long int refinement_count = processLine(line); 
-				if (refinement_count > 0) {
-					#pragma omp atomic
+				if(refinement_count > 0)
 					total_refinements += refinement_count;
-				}
-				else if(refinement_count < 0) {
-					#pragma omp atomic
+				else if(refinement_count < 0)
 					skipped_partial_solutions += 1;
-				}
-				if (partial_count % 1000 == 0) {
-					#pragma omp critical(logging)
-					{
-						auto current_time = chrono::steady_clock::now();
-						double elapsed = chrono::duration<double>(current_time - start_time).count();
-						
-						cout << "Processed " << partial_count << " partial solutions. Time elapsed: " << elapsed << " seconds with total refinements: " << total_refinements << endl;
-					}
+				if (partial_count % 1000 == 0) { 
+					auto current_time = chrono::steady_clock::now();
+					double elapsed = chrono::duration<double>(current_time - start_time).count();
+					cout << "Processed " << partial_count << " partial solutions. Time elapsed: " << elapsed << " seconds with total refinements: " << total_refinements << endl;
 				}
 				if(MAX_RUNTIME > 0 && MAX_RUNTIME < chrono::duration<double>(chrono::steady_clock::now() - start_time).count())
-					abort_early = true;
+					break;
+				if(MAX_PARTIAL_SOLUTIONS > 0 && partial_count > MAX_PARTIAL_SOLUTIONS)
+					break;
 			}
-		cout << "\n(" << curr_threads << " THREADS)\n";
-	#endif
+		}
+		p = nl ? nl + 1 : end;
+	}
+	munmap((void*)data, file_size);
+	cout << "\n";
 
 	double elapsed = chrono::duration<double>(chrono::steady_clock::now() - start_time).count();
 	
