@@ -18,11 +18,13 @@ parent_dir = os.path.dirname(script_dir)
 exhaust_satsolver_path = os.path.join(parent_dir, "cadical-exhaust-master", "build", "cadical-exhaust")
 satsolver_path = os.path.join(parent_dir, "kissat-rel-4.0.2", "build", "kissat")
 
-if len(sys.argv) < 5:
-	print("Usage: python3 all_net_encoding.py <template_id> <symbol transversal (1-10)> <partial on A (1/0)> <partial on B (1/0)>\n")
-	sys.exit(1)
+if len(sys.argv) < 7:
+    print("Usage: python3 all_net_encoding.py <solution file name> <template_id> <symbol transversals (1-10)> <partial on A (1/0)> <partial on B (1/0)> <common disjoint transversals (0-10)> <common transversals>\n")
+    sys.exit(1)
 
-template_id = int(sys.argv[1]) + 1
+solution_file = sys.argv[1]
+
+template_id = int(sys.argv[2]) + 1
 order = 10
 k_net = []
 mapping = {}
@@ -30,9 +32,10 @@ variable_counts = {}
 latin_squares = 3
 
 observed = []
-observed_syms = int(sys.argv[2]) # do partial solution on these symbol transversals
-observe_A = int(sys.argv[3]) == 1 #Q
-observe_B = int(sys.argv[4]) == 1 #Z
+observed_syms = int(sys.argv[3]) # do partial solution on these symbol transversals
+observe_A = int(sys.argv[4]) == 1 #Q
+observe_B = int(sys.argv[5]) == 1 #Z
+num_common_transversals = int(sys.argv[6])
 
 template_path = os.path.join(parent_dir, "refinements and candidate lines", "templates", str(template_id)+"-template.txt")
 
@@ -67,7 +70,7 @@ def runEncoding(can_forget=False, suffix=""):
 		filename += f"-{suffix}"
 	input_path = os.path.join(script_dir, f"{filename}-input.cnf")
 	output_path = os.path.join(script_dir, f"{filename}-output.txt")
-	solution_path = os.path.join(script_dir, f"{filename}-solutions.txt")
+	solution_path = os.path.join(script_dir, solution_file)
 	template = unloadTemplate(template_path)
 	encoding = encode.SATEncoder("As Encoding for Template Refinement", False)
 	
@@ -136,6 +139,41 @@ def runEncoding(can_forget=False, suffix=""):
 				else:
 					for s in range(4):
 						encoding.add_clause([-symbols[row][col][s]])
+
+	if num_common_transversals > 0:
+		# transversal_sym_in_Z[k][j][s] = True -> the cell that Q assigns symbol k in column j has symbol s in Z
+		transversal_sym_in_Z = [[[encoding.new_variable() for s in range(order)] for j in range(order)] for k in range(order)]
+		# We only need this auxiliary for Z (Q's own variables already define the transversal)
+
+		# Force unused slots to false
+		for k in range(num_common_transversals, order):
+			for j in range(order):
+				for s in range(order):
+					encoding.add_clause([-transversal_sym_in_Z[k][j][s]])
+
+		# For each active transversal k, enforce that transversal_sym_in_Z[k] is a bijection, i.e. the cells of Q's symbol-k slice carry all 10 symbols in Z
+		for k in range(num_common_transversals):
+			for i in range(order):
+				# Each symbol s appears exactly once across columns (symbol i used as both)
+				encoding.add_clause([transversal_sym_in_Z[k][j][i] for j in range(order)])
+				for j in range(order):
+					for j2 in range(j + 1, order):
+						encoding.add_clause([-transversal_sym_in_Z[k][j][i], -transversal_sym_in_Z[k][j2][i]])
+				# Each column has exactly one symbol
+				encoding.add_clause([transversal_sym_in_Z[k][i][s] for s in range(order)])
+				for s in range(order):
+					for s2 in range(s + 1, order):
+						encoding.add_clause([-transversal_sym_in_Z[k][i][s], -transversal_sym_in_Z[k][i][s2]])
+
+		# if Q[i][j]=k (cell (i,j) is on transversal k) and Z[i][j]=s, then transversal k carries symbol s in column j in Z, and vice versa
+		for i in range(order):
+			for j in range(order):
+				for k in range(num_common_transversals):
+					for s in range(order):
+						encoding.add_clause([-Q[i][j][k], -Z[i][j][s],  transversal_sym_in_Z[k][j][s]])
+						encoding.add_clause([-Q[i][j][k], -transversal_sym_in_Z[k][j][s],  Z[i][j][s]])
+						encoding.add_clause([-Z[i][j][s], -transversal_sym_in_Z[k][j][s],  Q[i][j][k]])
+
 	encoding.finalize_encoding()
 	print(encoding)
 
@@ -158,7 +196,7 @@ def runEncoding(can_forget=False, suffix=""):
 	wall_time = decoding.run_sat_solver(
 		exhaust_satsolver_path, 
 		input_path,
-		forget + ["--solfile", solution_path, "--inprocessing=false", "--observe"] + observed_string.split(),
+		forget + ["--solfile", solution_path, "--observe"] + observed_string.split(),
 		True,
 	)
 
@@ -175,7 +213,7 @@ def runEncoding(can_forget=False, suffix=""):
 		print("no solution")
 		
 if __name__ == "__main__":
-	runEncoding(True, "can_forget")
+	runEncoding(True, "can_forget with inprocessing")
 	# TODO: maybe make a clean up helper function and run it in runEncoding when forget is True
 
 # inprocessing off is faster than inprocessing on

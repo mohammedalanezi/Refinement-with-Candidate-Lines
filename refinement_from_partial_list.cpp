@@ -25,11 +25,15 @@
 #define ENABLE_MT 0
 #endif
 
-#define OUTPUT_SOLUTIONS 1
+#define VERIFY_SOLUTION 0
+#define OUTPUT_SOLUTIONS 0
+#define OUTPUT_PROGRESS 0
+
 #define TRACK_TIME 1
 #define PRINT_TIME 0
+
 #define MAX_RUNTIME 0 // a value below or equal to 0 skips timeout
-#define MAX_PARTIAL_SOLUTIONS 2000 // a value below or equal 0 runs all partial solutions
+#define MAX_PARTIAL_SOLUTIONS 0 // a value below or equal 0 runs all partial solutions
 
 using namespace std;
 
@@ -51,6 +55,7 @@ int* all_line_indices_B = nullptr;
 
 long skipped_partial_solutions = 0;
 long partial_count = 0;
+long duplicate_partial_count = 0;
 int count_A = 0;
 int count_B = 0;
 
@@ -100,6 +105,82 @@ unordered_map<__uint128_t, int, U128Hash> cand_hash_B;
 
 struct VarInfo { int8_t sq, r, c, s; }; // 4 bytes per entry
 VarInfo var_lookup[2 * order * order * order + 1]; // index by var (1-based)
+
+static inline uint64_t _wyrot(uint64_t x) { 
+	return (x>>32) | (x<<32); 
+}
+static inline void _wymix(uint64_t &A, uint64_t &B) {
+    __uint128_t r = (__uint128_t)A * B;
+    A = (uint64_t)r; 
+	B = (uint64_t)(r >> 64);
+}
+static inline uint64_t wyhash(const void* key, size_t len, uint64_t seed) {
+    const uint8_t* p = (const uint8_t*)key;
+    seed ^= 0x9e3779b97f4a7c15ULL;
+    uint64_t a, b;
+    if (len <= 16) {
+        if (len >= 4) {
+            a = (uint64_t)(*(uint32_t*)p) | ((uint64_t)(*(uint32_t*)(p+len-4)) << 32);
+            b = (uint64_t)(*(uint32_t*)(p+(len>>1)-2)) | ((uint64_t)(*(uint32_t*)(p+len-(len>>1)+2-4)) << 32);
+        } 
+		else if (len > 0) 
+		{ 
+			a = p[0] | ((uint64_t)p[len>>1] << 8) | ((uint64_t)p[len-1] << 16); 
+			b = 0; 
+		}
+        else
+			a = b = 0;
+    } else {
+        size_t i = len;
+        if (i > 48) {
+            uint64_t see1 = seed, see2 = seed;
+            do {
+                uint64_t w0,w1,w2,w3,w4,w5;
+                memcpy(&w0,p,8);
+				memcpy(&w1,p+8,8); 
+				memcpy(&w2,p+16,8);
+                memcpy(&w3,p+24,8); 
+				memcpy(&w4,p+32,8); 
+				memcpy(&w5,p+40,8);
+
+				uint64_t t0=seed^w0, t1=see1^w1; 
+				_wymix(t0,t1); 
+				seed=t0; 
+				see1=t1;
+
+                uint64_t t2=see2^w2, t3=seed^w3; 
+				_wymix(t2,t3); 
+				see2=t2; 
+				seed=t3;
+
+                uint64_t t4=seed^w4, t5=see1^w5; 
+				_wymix(t4,t5); 
+				seed=t4; 
+				see1=t5;
+
+                p+=48; 
+				i-=48;
+            } while (i>48);
+            seed ^= see1 ^ see2;
+        }
+        while (i > 16) {
+            uint64_t w0,w1; 
+			memcpy(&w0,p,8); 
+			memcpy(&w1,p+8,8);
+            uint64_t t0=seed^w0, t1=seed^w1; 
+			_wymix(t0,t1); 
+			seed=t0;
+			p+=16; 
+			i-=16;
+        }
+        memcpy(&a, p+i-16, 8); 
+		memcpy(&b, p+i-8, 8);
+    }
+    uint64_t t0=a^0xa0761d6478bd642fULL^seed, t1=b^0xe7037ed1a0b428dbULL;
+    _wymix(t0, t1);
+    a=t0; b=t1;
+    return a ^ b;
+}
 
 // Debugging helpers (not used in hot path)
 void mask_print(__uint128_t m) {
@@ -184,6 +265,11 @@ vector<int> parse_line(const string& line, char prefix) {
 	while (iss >> val) 
 		result.push_back(val);
 	return result;
+}
+
+unsigned int __builtin_popcountll_128(__uint128_t n) {
+    return __builtin_popcountll((unsigned long long)n) + 
+           __builtin_popcountll((unsigned long long)(n >> 64));
 }
 
 /**
@@ -369,6 +455,55 @@ void precomputeDataStructures() {
 }
 
 /**
+ * @brief Verifies that a set of B candidate lines (given as 1-based variable indices) covers all 100 points exactly once.
+ * Checks: exactly `order` lines selected, no two lines share a point, union covers all points.
+ * @param b_vars 1-based variable indices (positive literals) for the selected B lines.
+ * @returns true if valid, false otherwise. Prints a diagnostic to stderr if invalid.
+ */
+bool verify_b_solution(const vector<int>& b_vars, __uint128_t a_lines[]) {
+    if ((int)b_vars.size() != order) {
+        cerr << "[VERIFY FAIL] Expected " << order << " B lines, got " << b_vars.size() << "\n";
+        return false;
+    }
+
+    __uint128_t coverage = 0;
+    for (int v : b_vars) {
+        int idx = v - 1; // 0-based
+        if (idx < 0 || idx >= count_B) {
+            cerr << "[VERIFY FAIL] B variable " << v << " out of range [1," << count_B << "]\n";
+            return false;
+        }
+        __uint128_t m = cand_masks_B[idx];
+		for(int i=0; i < order; i++)
+			if (!intersectsExactlyOnce(a_lines[i], m))
+			{
+				cerr << "[VERIFY FAIL] B line " << v << " intersects exactly " << __builtin_popcountll_128(a_lines[i] & m) << " times, not once, with A square\n";
+				mask_print(a_lines[i]);
+				mask_print(m);
+				return false;
+			}
+        if ((coverage & m) != 0) {
+            cerr << "[VERIFY FAIL] B line " << v << " overlaps with a previously selected line\n";
+            return false;
+        }
+        coverage |= m;
+    }
+
+    __uint128_t expected = ((__uint128_t)1 << (order * order)) - 1; // 100 bits
+    if (coverage != expected) {
+        cerr << "[VERIFY FAIL] Coverage mask does not cover all 100 points\n";
+        uint64_t lo = (uint64_t)coverage;
+        uint64_t hi = (uint64_t)(coverage >> 64);
+        uint64_t exp_lo = (uint64_t)expected;
+        uint64_t exp_hi = (uint64_t)(expected >> 64);
+        cerr << "  lo: " << hex << lo << " (expected " << exp_lo << ")\n";
+        cerr << "  hi: " << hex << hi << " (expected " << exp_hi << ")\n" << dec;
+        return false;
+    }
+    return true;
+}
+
+/**
  * @brief Finds all candidate lines that share no points with a given set of lines.
  *
  * Parallel means having zero intersection with every line in the input set, i.e. the candidate occupies a completely disjoint set of points. The solution lines themselves are always included in the output regardless.
@@ -515,21 +650,22 @@ void mapSolutionToGlobalIndices(
  * @param B_count   Number of candidate B lines.
  * @returns The total number of valid refinements found.
  */
-int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[], const int A_count, const int B_indices[], const int B_count) {
+int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[], const int A_count, const int B_indices[], const int B_count, __uint128_t A_masks[]) {
 #if TRACK_TIME == 1
     auto timer = chrono::steady_clock::now();
 #endif
-    
-    CaDiCaL::Solver solver;
-	//solver.resize(A_count + B_count); // experimental: for 3.0
 
 	if (trans_A < order)
 	{
 		__uint128_t total_incidence_A = cand_masks_A[A_indices[0]];
 		for(int i=1; i < A_count; i++) // get all points contained in line indices
 			total_incidence_A |= cand_masks_A[A_indices[i]];
-		if(total_incidence_A != all_points_mask) // return immedately if not covering all points
+		if(total_incidence_A != all_points_mask) {
+			#if TRACK_TIME == 1
+			total_sat_setup_time += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
+			#endif
 			return -1;
+		}
 	}
 
 	if (trans_B < order)
@@ -537,9 +673,19 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
 		__uint128_t total_incidence_B = cand_masks_B[B_indices[0]];
 		for(int i=1; i < B_count; i++)
 			total_incidence_B |= cand_masks_B[B_indices[i]];
-		if(total_incidence_B != all_points_mask)
+		if(total_incidence_B != all_points_mask) {
+			#if TRACK_TIME == 1
+			total_sat_setup_time += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
+			#endif
 			return -1;
+		}
 	}
+    
+    CaDiCaL::Solver solver;
+    
+	solver.set("factor", 0);
+	solver.set("factorcheck", 0);
+	//solver.resize(A_count + B_count); // experimental: for 3.0
 
 	for(int i = 0; i < trans_A; i++)
 		solver.clause(i+1);
@@ -688,7 +834,29 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
     int result = solver.solve();
     long int sol_count = propagator.get_solution_count();
 
-	#if OUTPUT_SOLUTIONS
+#if VERIFY_SOLUTION == 1
+	int invalid = 0;
+	for (const auto& local_vars : propagator.get_solutions()) {
+		// local_vars contains the 1-based B line variable indices that are true in this solution
+		vector<int> b_vars;
+		for (int v : local_vars)
+		{
+			if (v > 0 && v <= count_B)
+				b_vars.push_back(v);
+			}
+		if (!verify_b_solution(b_vars, A_masks))
+			invalid++;
+	}
+	if (sol_count > 0) {
+		int valid = (int)sol_count - invalid;
+		cerr << "[VERIFY " << partial_count << "] " << valid << "/" << sol_count << " solutions valid";
+		if (invalid > 0)
+			cerr << " -- " << invalid << " INVALID!";
+		cerr << "\n";
+	}
+#endif
+
+#if OUTPUT_SOLUTIONS == 1
 	for (const auto& local_vars : propagator.get_solutions()) {
 		vector<int> global_A, global_B;
 		mapSolutionToGlobalIndices(local_vars, A_indices, A_count, B_indices, B_count, global_A, global_B);
@@ -701,7 +869,7 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
 		for (int idx : global_B) cerr << " " << (idx + 1);
 		cerr << "\n";
 	}
-	#endif
+#endif
     
 #if TRACK_TIME == 1
     double solver_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
@@ -736,21 +904,19 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
  * @param line A space-separated string of non-zero SAT literals representing a partial solution. A trailing '0' is stripped if present.
  * @returns The number of valid refinements found for this partial solution, or 0 if the line is empty or yields no valid candidates.
  */
-int processLine(string& line)
+int processLine(const char* p, size_t len)
 {
 #if TRACK_TIME == 1
 	auto read_time = chrono::steady_clock::now();
 #endif 
-	if (line.empty()) 
-		return 0;
-	if (line.back() == '0')
-		line.pop_back();
+    if (len == 0) return 0;
+    if (p[len-1] == '0') len--; // replaces line.back()=='0' / line.pop_back()
+
+    const char* end = p + len;
 
 	int solution[2 * order * order];
 	int solution_count = 0;
 
-	const char* p = line.c_str();
-	const char* end = p + line.size();
 	while (p < end) {
 		while (p < end && (*p == ' ' || *p == '\t')) p++; // skip whitespace
 		if (p >= end) break;
@@ -835,7 +1001,7 @@ int processLine(string& line)
 	total_line_intersection_time += elapsed_3;
 #endif
 
-	long int refinement_count = get_refinements(trans_A, trans_B, intersecting_A_indices, intersection_A_count, intersecting_B_indices, intersection_B_count);
+	long int refinement_count = get_refinements(trans_A, trans_B, intersecting_A_indices, intersection_A_count, intersecting_B_indices, intersection_B_count, A_sol_lines);
 
 	return refinement_count;
 }
@@ -873,7 +1039,7 @@ int main(int argc, char* argv[]) {
 	long long total_refinements = 0;
 
 	unordered_set<size_t> seen;
-	seen.reserve(2000000);
+	seen.reserve(1 << 23); // 8,388,608 so we have a ~0.54 load factor
 
 	int fd = open(solution_file.c_str(), O_RDONLY);
 	if (fd < 0) { cerr << "Cannot open: " << solution_file << "\n"; return 1; }
@@ -882,7 +1048,8 @@ int main(int argc, char* argv[]) {
 	size_t file_size = sb.st_size;
 	const char* data = (const char*)mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
 	close(fd);
-	madvise((void*)data, file_size, MADV_SEQUENTIAL); // hint to kernel: read ahead
+	madvise((void*)data, file_size, MADV_SEQUENTIAL);
+	madvise((void*)data, file_size, MADV_HUGEPAGE); 
 
 	const char* p   = data;
 	const char* end = data + file_size;
@@ -905,30 +1072,32 @@ int main(int argc, char* argv[]) {
 				#if TRACK_TIME == 1
 				auto hash_time = chrono::steady_clock::now();
 				#endif
-				size_t h = 14695981039346656037ULL; // hash inline — no string allocation at all
-				for (size_t i = 0; i < len; i++)
-					h = (h ^ (unsigned char)p[i]) * 1099511628211ULL;
+				size_t h = wyhash(p, len, 0x517cc1b727220a95ULL); // wyhash has much better collision resistance than FNV-1a 
+
 				bool is_new = seen.insert(h).second;
 				#if TRACK_TIME == 1
 				total_hash_dedup_time += chrono::duration<double>(chrono::steady_clock::now() - hash_time).count();
 				#endif
 				if (is_new) {
-					string line(p, len);
-					long int refinement_count = processLine(line); 
+					long int refinement_count = processLine(p, len); 
 					if(refinement_count > 0)
 						total_refinements += refinement_count;
 					else if(refinement_count < 0)
 						skipped_partial_solutions += 1;
-					if (partial_count % 1000 == 0) { 
+#if OUTPUT_PROGRESS == 1
+					if (partial_count % 10000 == 0) { 
 						auto current_time = chrono::steady_clock::now();
 						double elapsed = chrono::duration<double>(current_time - start_time).count();
-						cout << "Processed " << partial_count << " partial solutions. Time elapsed: " << elapsed << " seconds with total refinements: " << total_refinements << endl;
+						cout << "Processed " << partial_count << " partial solutions. Time elapsed: " << elapsed << " seconds with total refinements: " << total_refinements << "\n";
 					}
+#endif
 					if(MAX_RUNTIME > 0 && MAX_RUNTIME < chrono::duration<double>(chrono::steady_clock::now() - start_time).count())
 						break;
 					if(MAX_PARTIAL_SOLUTIONS > 0 && partial_count > MAX_PARTIAL_SOLUTIONS)
 						break;
 				}
+				else
+					duplicate_partial_count++;
 			}
     		p = nl ? nl + 1 : end;
 		}
@@ -955,9 +1124,7 @@ int main(int argc, char* argv[]) {
 				#if TRACK_TIME == 1
 				auto hash_time = chrono::steady_clock::now();
 				#endif
-				size_t h = 14695981039346656037ULL; // FNV‑1a hash
-				for (size_t i = 0; i < len; ++i)
-					h = (h ^ (unsigned char)p[i]) * 1099511628211ULL;
+				size_t h = wyhash(p, len, 0x517cc1b727220a95ULL);
 				bool is_new = seen.insert(h).second;
 				#if TRACK_TIME == 1
 				total_hash_dedup_time += chrono::duration<double>(chrono::steady_clock::now() - hash_time).count();
@@ -965,6 +1132,8 @@ int main(int argc, char* argv[]) {
 				if (is_new) {
 					unique_lines.push_back({p, len});
 				}
+				else
+					duplicate_partial_count++;
 			}
 			p = nl ? nl + 1 : end;
 		}
@@ -984,8 +1153,7 @@ int main(int argc, char* argv[]) {
 		for (size_t sol_idx = 0; sol_idx < unique_lines.size(); sol_idx++)
 			if (!abort_early) {
         		const LineInfo& li = unique_lines[sol_idx];
-        		string line(li.start, li.len);          // copy to mutable string
-				long int refinement_count = processLine(line); 
+				long int refinement_count = processLine(li.start, li.len);
 				if (refinement_count > 0) {
 					#pragma omp atomic
 					total_refinements += refinement_count;
@@ -1015,13 +1183,13 @@ int main(int argc, char* argv[]) {
 	
 	cout << "=== FINAL RESULTS FOR TEMPLATE " << template_id - 1 << " ===\n";
 	cout << "Total refinements found: " << total_refinements << endl;
-	cout << "Partial solutions processed: " << partial_count << " (" << skipped_partial_solutions << " skipped)" << endl;
+	cout << "Partial solutions processed: " << partial_count << " (" << skipped_partial_solutions << " skipped)" << " (+" << duplicate_partial_count << " duplicates)" << endl;
 	cout << "Time elapsed: " << elapsed << " seconds\n";
 	cout << "Throughput: " << (partial_count / elapsed) << " solutions/sec\n";
 	cout << "File: " << solution_file << endl;
 
 #if TRACK_TIME == 1
-	double sat_total_encode = total_sat_atmost1_time + total_sat_atleast1_time + total_sat_intersection_time;
+	double sat_total_encode = total_sat_setup_time + total_sat_atmost1_time + total_sat_atleast1_time + total_sat_intersection_time;
 	double sat_total = sat_total_encode + total_sat_solving_time;
 	double line_total = total_line_read_time + total_line_parse_time + total_line_finding_time + total_line_parallel_time + total_line_intersection_time;
 	double io_total = total_stream_read_time + total_hash_dedup_time;
@@ -1054,7 +1222,7 @@ int main(int argc, char* argv[]) {
 #endif
 
 #if MAX_PARTIAL_SOLUTIONS > 0
-	cout << "\nMax Partial Solutions: " << MAX_PARTIAL_SOLUTIONS << " seconds\n";
+	cout << "\nMax Partial Solutions: " << MAX_PARTIAL_SOLUTIONS << " solutions\n";
 #endif
 
 	return 0;
