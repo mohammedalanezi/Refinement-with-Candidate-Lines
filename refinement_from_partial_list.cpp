@@ -106,82 +106,6 @@ unordered_map<__uint128_t, int, U128Hash> cand_hash_B;
 struct VarInfo { int8_t sq, r, c, s; }; // 4 bytes per entry
 VarInfo var_lookup[2 * order * order * order + 1]; // index by var (1-based)
 
-static inline uint64_t _wyrot(uint64_t x) { 
-	return (x>>32) | (x<<32); 
-}
-static inline void _wymix(uint64_t &A, uint64_t &B) {
-    __uint128_t r = (__uint128_t)A * B;
-    A = (uint64_t)r; 
-	B = (uint64_t)(r >> 64);
-}
-static inline uint64_t wyhash(const void* key, size_t len, uint64_t seed) {
-    const uint8_t* p = (const uint8_t*)key;
-    seed ^= 0x9e3779b97f4a7c15ULL;
-    uint64_t a, b;
-    if (len <= 16) {
-        if (len >= 4) {
-            a = (uint64_t)(*(uint32_t*)p) | ((uint64_t)(*(uint32_t*)(p+len-4)) << 32);
-            b = (uint64_t)(*(uint32_t*)(p+(len>>1)-2)) | ((uint64_t)(*(uint32_t*)(p+len-(len>>1)+2-4)) << 32);
-        } 
-		else if (len > 0) 
-		{ 
-			a = p[0] | ((uint64_t)p[len>>1] << 8) | ((uint64_t)p[len-1] << 16); 
-			b = 0; 
-		}
-        else
-			a = b = 0;
-    } else {
-        size_t i = len;
-        if (i > 48) {
-            uint64_t see1 = seed, see2 = seed;
-            do {
-                uint64_t w0,w1,w2,w3,w4,w5;
-                memcpy(&w0,p,8);
-				memcpy(&w1,p+8,8); 
-				memcpy(&w2,p+16,8);
-                memcpy(&w3,p+24,8); 
-				memcpy(&w4,p+32,8); 
-				memcpy(&w5,p+40,8);
-
-				uint64_t t0=seed^w0, t1=see1^w1; 
-				_wymix(t0,t1); 
-				seed=t0; 
-				see1=t1;
-
-                uint64_t t2=see2^w2, t3=seed^w3; 
-				_wymix(t2,t3); 
-				see2=t2; 
-				seed=t3;
-
-                uint64_t t4=seed^w4, t5=see1^w5; 
-				_wymix(t4,t5); 
-				seed=t4; 
-				see1=t5;
-
-                p+=48; 
-				i-=48;
-            } while (i>48);
-            seed ^= see1 ^ see2;
-        }
-        while (i > 16) {
-            uint64_t w0,w1; 
-			memcpy(&w0,p,8); 
-			memcpy(&w1,p+8,8);
-            uint64_t t0=seed^w0, t1=seed^w1; 
-			_wymix(t0,t1); 
-			seed=t0;
-			p+=16; 
-			i-=16;
-        }
-        memcpy(&a, p+i-16, 8); 
-		memcpy(&b, p+i-8, 8);
-    }
-    uint64_t t0=a^0xa0761d6478bd642fULL^seed, t1=b^0xe7037ed1a0b428dbULL;
-    _wymix(t0, t1);
-    a=t0; b=t1;
-    return a ^ b;
-}
-
 // Debugging helpers (not used in hot path)
 void mask_print(__uint128_t m) {
     uint64_t hi = (uint64_t)(m >> 64);
@@ -1038,9 +962,6 @@ int main(int argc, char* argv[]) {
 	
 	long long total_refinements = 0;
 
-	unordered_set<size_t> seen;
-	seen.reserve(1 << 23); // 8,388,608 so we have a ~0.54 load factor
-
 	int fd = open(solution_file.c_str(), O_RDONLY);
 	if (fd < 0) { cerr << "Cannot open: " << solution_file << "\n"; return 1; }
 	struct stat sb;
@@ -1069,35 +990,22 @@ int main(int argc, char* argv[]) {
 			#endif
 
 			if (len > 0) {
-				#if TRACK_TIME == 1
-				auto hash_time = chrono::steady_clock::now();
-				#endif
-				size_t h = wyhash(p, len, 0x517cc1b727220a95ULL); // wyhash has much better collision resistance than FNV-1a 
-
-				bool is_new = seen.insert(h).second;
-				#if TRACK_TIME == 1
-				total_hash_dedup_time += chrono::duration<double>(chrono::steady_clock::now() - hash_time).count();
-				#endif
-				if (is_new) {
-					long int refinement_count = processLine(p, len); 
-					if(refinement_count > 0)
-						total_refinements += refinement_count;
-					else if(refinement_count < 0)
-						skipped_partial_solutions += 1;
+				long int refinement_count = processLine(p, len); 
+				if(refinement_count > 0)
+					total_refinements += refinement_count;
+				else if(refinement_count < 0)
+					skipped_partial_solutions += 1;
 #if OUTPUT_PROGRESS == 1
-					if (partial_count % 10000 == 0) { 
-						auto current_time = chrono::steady_clock::now();
-						double elapsed = chrono::duration<double>(current_time - start_time).count();
-						cout << "Processed " << partial_count << " partial solutions. Time elapsed: " << elapsed << " seconds with total refinements: " << total_refinements << "\n";
-					}
-#endif
-					if(MAX_RUNTIME > 0 && MAX_RUNTIME < chrono::duration<double>(chrono::steady_clock::now() - start_time).count())
-						break;
-					if(MAX_PARTIAL_SOLUTIONS > 0 && partial_count > MAX_PARTIAL_SOLUTIONS)
-						break;
+				if (partial_count % 10000 == 0) { 
+					auto current_time = chrono::steady_clock::now();
+					double elapsed = chrono::duration<double>(current_time - start_time).count();
+					cout << "Processed " << partial_count << " partial solutions. Time elapsed: " << elapsed << " seconds with total refinements: " << total_refinements << "\n";
 				}
-				else
-					duplicate_partial_count++;
+#endif
+				if(MAX_RUNTIME > 0 && MAX_RUNTIME < chrono::duration<double>(chrono::steady_clock::now() - start_time).count())
+					break;
+				if(MAX_PARTIAL_SOLUTIONS > 0 && partial_count > MAX_PARTIAL_SOLUTIONS)
+					break;
 			}
     		p = nl ? nl + 1 : end;
 		}
@@ -1120,21 +1028,8 @@ int main(int argc, char* argv[]) {
 			total_stream_read_time += chrono::duration<double>(chrono::steady_clock::now() - stream_time).count();
 			#endif
 
-			if (len > 0) {
-				#if TRACK_TIME == 1
-				auto hash_time = chrono::steady_clock::now();
-				#endif
-				size_t h = wyhash(p, len, 0x517cc1b727220a95ULL);
-				bool is_new = seen.insert(h).second;
-				#if TRACK_TIME == 1
-				total_hash_dedup_time += chrono::duration<double>(chrono::steady_clock::now() - hash_time).count();
-				#endif
-				if (is_new) {
-					unique_lines.push_back({p, len});
-				}
-				else
-					duplicate_partial_count++;
-			}
+			if (len > 0)
+				unique_lines.push_back({p, len});
 			p = nl ? nl + 1 : end;
 		}
 		
