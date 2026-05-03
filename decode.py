@@ -37,6 +37,9 @@ class SATDecoder:
 		
 		self.use_pipe = use_pipe
 		self.pipe_buffer = StringIO(pipe_content) if use_pipe and pipe_content else (StringIO() if use_pipe else None)
+
+		self.timings = {}
+		self.solution_count = -1
 	
 	def __str__(self) -> str:
 		"""Return string representation of the SAT solution."""
@@ -88,7 +91,8 @@ class SATDecoder:
 				return f.readlines()
 		return []
 	
-	def run_sat_solver(self, sat_solver_path : str = None, input_path : str = None, arguments : str = [], display_to_console : bool = False, on_solution_found = None, input_content : str = None) -> float | None:
+	def run_sat_solver(self, sat_solver_path : str = None, input_path : str = None, arguments : str = [], 
+					display_to_console : bool = False, on_solution_found = None, input_content : str = None, track_solution_count : bool = True, track_timings : bool = True) -> float | None:
 		"""
 		Runs SAT instance through a specified SAT Solver with a specified Input file and outputs it to our Output file.
 		
@@ -109,6 +113,11 @@ class SATDecoder:
 		if not input_path and not input_content:
 			print(f"WARNING: No input path or content provided.")
 			return None
+			
+		if track_solution_count:
+			self.solution_count = 0
+		if track_timings:
+			self.timings = {}
 		
 		wall_time = time.time()
 		
@@ -154,10 +163,8 @@ class SATDecoder:
 					with open(self.file_path, "a") as out_file:
 						out_file.write(line)
 				
-				if on_solution_found and line.startswith("c New solution:"):
-					solution_str = line[16:].strip()
-					on_solution_found(solution_str)
-			
+				self._process_sat_output(line)
+				
 			process.stdout.close()
 			process.wait()
 			
@@ -180,35 +187,40 @@ class SATDecoder:
 					print(line, end="", flush=True)
 				self.pipe_buffer.write(line)
 				
-				if on_solution_found and line.startswith("c New solution:"):
-					solution_str = line[16:].strip()
-					on_solution_found(solution_str)
+				self._process_sat_output(line)
 			
 			process.stdout.close()
 			process.wait()
 			
 		elif self.file_path: # file mode (write to file)
 			with open(self.file_path, "w") as out_file:
-				commands = [sat_solver_path, input_path] + arguments
-				
-				process = subprocess.Popen(
-					commands,
-					stdout=subprocess.PIPE,
-					stderr=subprocess.STDOUT,
-					text=True
-				)
-
-				for line in process.stdout:
-					if display_to_console:
-						print(line, end="", flush=True)
-					out_file.write(line)
+				if not on_solution_found and not display_to_console:
+					commands = [sat_solver_path, input_path] + arguments
 					
-					if on_solution_found and line.startswith("c New solution:"):
-						solution_str = line[16:].strip()
-						on_solution_found(solution_str)
+					process = subprocess.run(
+						commands,
+						stdout=out_file,
+						stderr=subprocess.STDOUT
+					)
+				else:
+					commands = [sat_solver_path, input_path] + arguments
+					
+					process = subprocess.Popen(
+						commands,
+						stdout=subprocess.PIPE,
+						stderr=subprocess.STDOUT,
+						text=True
+					)
 
-				process.stdout.close()
-				process.wait()
+					for line in process.stdout:
+						if display_to_console:
+							print(line, end="", flush=True)
+						out_file.write(line)
+
+						self._process_sat_output(line)
+
+					process.stdout.close()
+					process.wait()
 		else:
 			print(f"WARNING: No output path or pipe mode enabled.")
 			return None
@@ -236,6 +248,12 @@ class SATDecoder:
 					timings['process-time-since-initialization'] = line.split()[6]
 				if line.startswith("c total real time since initialization:"):
 					timings['initialization-real-time-total'] = line.split()[6]
+					
+				clause_info = self._parse_clause_line(line)
+				if clause_info:
+					clauses, parse_time = clause_info
+					self.timings["parse-clause-count"] = clauses
+					self.timings["parsing-time"] = parse_time
 		
 		return timings
 	
@@ -250,10 +268,10 @@ class SATDecoder:
 		with open(self.file_path, 'r') as f:
 			for line in f:
 				line = line.strip()
+				if ("SATISFIABLE" in line) or ("New solution" in line): # sat or exhaustive and at least 1 solution
+					return True
 				if "UNSATISFIABLE" in line:
 					return False
-				if "SATISFIABLE" in line:
-					return True
 		
 		return None
 	
@@ -307,3 +325,91 @@ class SATDecoder:
 					solutions.append(line[16:-2])
 		
 		return count, solutions
+	
+	def _process_sat_output(self, line: str, on_solution_found = None, track_solution_count : bool = True, track_timings : bool = True):
+		if on_solution_found and line.startswith("c New solution:"):
+			solution_str = line[16:].strip()
+			on_solution_found(solution_str)
+		
+		if track_solution_count and line.startswith('c '):
+			val = self._parse_last_value(line)
+			if val != -1:
+				self.solution_count = val   # update to latest cumulative count
+
+		if track_timings and line.startswith('c '):
+			timing = self._parse_timing_line(line)
+			if timing:
+				key, value = timing
+				self.timings[key] = value 
+
+			clause_info = self._parse_clause_line(line)
+			if clause_info:
+				clauses, parse_time = clause_info
+				self.timings["parse-clause-count"] = clauses
+				self.timings["parsing-time"] = parse_time
+
+	def _parse_last_value(self, line: str):
+		"""
+		Parse the last token of a line as a numeric value.
+		Returns the number if line has exactly 20 tokens and last token has no '%',
+		otherwise returns -1.
+		"""
+		tokens = line.split()
+		if len(tokens) != 20:
+			return -1
+		last = tokens[-1]
+		if '%' in last:
+			return -1
+		try:
+			# Try int first, fallback to float
+			return int(last)
+		except ValueError:
+			try:
+				return float(last)
+			except ValueError:
+				return -1
+	
+	def _parse_timing_line(self, line: str) -> tuple[str, float] | None:
+		"""Extract timing name and value from a line. Returns (key, value) or None."""
+		line = line.strip()
+		if line.startswith('c process-time:'):
+			# line: "c process-time: 0.01 seconds"
+			parts = line.split()
+			if len(parts) >= 3:
+				return ("process-time", float(parts[2]))
+		elif line.startswith('c finished parsing after'):
+			# line: "c finished parsing after 0.00 seconds"
+			parts = line.split()
+			if len(parts) >= 5:
+				return ("parse-time", float(parts[4]))
+		elif line.startswith("c total process time since initialization:"):
+			# line: "c total process time since initialization: 0.01 seconds"
+			parts = line.split()
+			if len(parts) >= 7:
+				return ("process-time-since-initialization", float(parts[6]))
+		elif line.startswith("c total real time since initialization:"):
+			parts = line.split()
+			if len(parts) >= 7:
+				return ("initialization-real-time-total", float(parts[6]))
+		return None
+	
+	def _parse_clause_line(self, line: str):
+		"""
+		Extracts clause count and parsing time from a line like: 'c parsed 77372 clauses in 0.04 seconds process time'
+
+		Returns (clause_count (int), time_seconds (float)) or None if no match.
+		"""
+		line = line.strip()
+		# Match pattern: "c parsed <number> clauses in <float> seconds process time"
+		if not line.startswith("c parsed "):
+			return None
+		# Remove the leading "c " and split
+		parts = line[2:].split()
+		if len(parts) >= 7 and parts[0] == "parsed" and parts[2] == "clauses" and parts[3] == "in" and parts[5] == "seconds":
+			try:
+				clause_count = int(parts[1])
+				time_taken = float(parts[4])
+				return clause_count, time_taken
+			except (ValueError, IndexError):
+				pass
+		return None

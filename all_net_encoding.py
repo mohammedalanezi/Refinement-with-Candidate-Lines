@@ -196,21 +196,15 @@ def runEncoding(can_forget=False, suffix=""):
 	wall_time = decoding.run_sat_solver(
 		exhaust_satsolver_path, 
 		input_path,
-		forget + ["--solfile", solution_path, "--observe"] + observed_string.split(),
+		forget + ["--solfile", solution_path, "--observe"] + observed_string.split(), # + ["-t", "4"]
 		True,
 	)
 
 		# TODO: move --solfile to decode.py and maybe edit cadical-exhaust to output solfile location to console at the start
 
-	if decoding.get_satisfiability():
-		print("Found solutions, output written to", solution_path)
-		count, _ = decoding.get_exhaustive_solutions()
-		print(f"Found {count} solutions in the sat instance.")
-		timings = decoding.get_timings()
-		for key, value in timings.items():
-			print(f"{key}: {value}")
-	else:
-		print("no solution")
+	print("Found solutions, output written to", solution_path)
+	print(f"Found {decoding.solution_count} solutions in the sat instance.")
+	print(f"Timings: {decoding.timings}")
 		
 if __name__ == "__main__":
 	runEncoding(True, "can_forget with inprocessing")
