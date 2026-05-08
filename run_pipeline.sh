@@ -9,9 +9,8 @@ set -euo pipefail
 
 SCRIPT_START=$(date +%s)
 
-SYM_TRANSVERSALS=10        # symbol transversals to observe (1-10)
-OBSERVE_A=1                # partial on A (1=yes, 0=no)
-OBSERVE_B=0                # partial on B (1=yes, 0=no)
+OBSERVE_A=10               # symbol transversals to observe on A (10=all, ..., 0=none)
+OBSERVE_B=0                # symbol transversals to observe on B (10=all, ..., 0=none)
 COMMON_TRANSVERSALS=0      # common disjoint transversals (0-10)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -29,7 +28,7 @@ fi
 TEMPLATE_ID="$1"
 
 # Solution file is placed alongside the SAT1 script so both programs resolve it the same way.
-SOLUTION_FILE="${TEMPLATE_ID}-${SYM_TRANSVERSALS}-${OBSERVE_A}-${OBSERVE_B}-${COMMON_TRANSVERSALS}-solutions.txt"
+SOLUTION_FILE="${TEMPLATE_ID}-${OBSERVE_A}-${OBSERVE_B}-${COMMON_TRANSVERSALS}-solutions.txt"
 SOLUTION_PATH="$SCRIPT_DIR/$SOLUTION_FILE" # could we smart to change this to home path so WSL read/write overhead is avoided
 
 SAT1_LOG="$(mktemp)" # Temporary file to capture SAT1 stdout for timing extraction
@@ -37,7 +36,7 @@ trap 'rm -f "$SAT1_LOG"' EXIT
 
 # ============================================================
 echo "============================================================"
-echo " Pipeline: template=${TEMPLATE_ID}  symT=${SYM_TRANSVERSALS} observe_A=${OBSERVE_A}  observe_B=${OBSERVE_B} common_T=${COMMON_TRANSVERSALS}"
+echo " Pipeline: template=${TEMPLATE_ID}  observe_A=${OBSERVE_A}  observe_B=${OBSERVE_B} common_T=${COMMON_TRANSVERSALS}"
 echo " Solution file: $SOLUTION_FILE"
 echo "============================================================"
 echo
@@ -48,7 +47,7 @@ echo "------------------------------------------------------------"
 SAT1_START=$(date +%s%N)
 
 # we use a tee so you see live output AND we capture it for the summary
-python3 "$SAT1_SCRIPT" "$SOLUTION_FILE" "$TEMPLATE_ID" "$SYM_TRANSVERSALS" "$OBSERVE_A" "$OBSERVE_B" "$COMMON_TRANSVERSALS" 2>&1 | tee "$SAT1_LOG"
+python3 "$SAT1_SCRIPT" "$SOLUTION_FILE" "$TEMPLATE_ID" "$OBSERVE_A" "$OBSERVE_B" "$COMMON_TRANSVERSALS" 2>&1 | tee "$SAT1_LOG"
 
 SAT1_EXIT="${PIPESTATUS[0]}"
 SAT1_END=$(date +%s%N)
@@ -113,6 +112,10 @@ echo
 # ---- Total -------------------------------------------------
 TOTAL_WALL=$(echo "scale=3; $SAT1_WALL + $DEDUP_WALL + $SAT2_WALL" | bc)
 
+# ============================================================
+echo "============================================================"
+echo " Pipeline: template=${TEMPLATE_ID}  observe_A=${OBSERVE_A}  observe_B=${OBSERVE_B} common_T=${COMMON_TRANSVERSALS}"
+echo " Solution file: $SOLUTION_FILE"
 echo "============================================================"
 echo " TOTAL PIPELINE TIMING"
 echo "   SAT 1 wall time : ${SAT1_WALL}s"
