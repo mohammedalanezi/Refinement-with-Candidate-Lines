@@ -58,9 +58,6 @@ long partial_count = 0;
 int count_A = 0;
 int count_B = 0;
 
-uint64_t* overlaps_AA = nullptr;
-uint64_t* overlaps_BB = nullptr;
-
 __uint128_t all_points_mask; // bit (p-1) set means point p is on this line (points 1–100, so bits 0–99 used)
 
 vector<__uint128_t> cand_masks_A; 
@@ -298,12 +295,7 @@ void solutionToCandidateLines(const int* solution, const int& solution_count, __
  *  - `intersects_once_BA[i * rows_B + w]`: bit j set iff B line j intersects A line i exactly once
  *    (both transposes of each other, allows us row-major access from either direction).
  *
- *  - `overlaps_AA[i * rows_A + w]`: bit j set iff A lines i and j share at least one point
- *    (Symmetric: `overlaps_AA[i]` has bit j set iff `overlaps_AA[j]` has bit i set),
- *
- *  - `overlaps_BB[i * rows_B + w]`: same as overlaps_AA but for square B lines.
- *
- * With ~14k lines per side, intersects_once_AB/BA are ~24MB each and overlaps_AA/BB are ~24MB each. 
+ * With ~14k lines per side, intersects_once_AB/BA are ~24MB each. 
  * All four fit in L3 cache, keeping the bit lookups fast across all tens of millions of calls.
  *
  * Also initialises:
@@ -333,23 +325,6 @@ void precomputeDataStructures() {
 				intersects_once_BA[(long long)i * rows_B + j / 64] |= (1ULL << (j % 64)); // symmetric entry, row i, word j/64, bit j%64
 			}
 		}
-	
-	// zero-initialized bitset table: count_A rows, each rows_A is words wide
-	overlaps_AA = new uint64_t[(long long)count_A * rows_A](); // overlaps_AA[i * rows_A + j/64] bit (j%64) will be set iff A lines i and j share >= 1 point.
-	for (int i = 0; i < count_A; i++)
-		for (int j = i + 1; j < count_A; j++) // j > i: fill upper triangle only, then mirror to avoid redundant work
-			if (linesIntersect(cand_masks_A[i], cand_masks_A[j])) {
-				overlaps_AA[(long long)i * rows_A + j / 64] |= (1ULL << (j % 64)); // Row i, word j/64, bit j%64 marks that line j overlaps line i
-				overlaps_AA[(long long)j * rows_A + i / 64] |= (1ULL << (i % 64)); // (symmetric) Row j, word i/64, bit i%64 marks that line i overlaps line j
-			}
- 
-	overlaps_BB = new uint64_t[(long long)count_B * rows_B](); // same as overlaps_AA but for Bs
-	for (int i = 0; i < count_B; i++)
-		for (int j = i + 1; j < count_B; j++)
-			if (linesIntersect(cand_masks_B[i], cand_masks_B[j])) {
-				overlaps_BB[(long long)i * rows_B + j / 64] |= (1ULL << (j % 64));
-				overlaps_BB[(long long)j * rows_B + i / 64] |= (1ULL << (i % 64));
-			}
 
 	all_line_indices_A = new int[count_A];
 	for(int i = 0; i < count_A; i++)
@@ -627,14 +602,13 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
 	if (trans_A < order) // if A is not fully determined by the partial solution
 		for (int i = 0; i < A_count; i++)
 			for (int j = i + 1; j < A_count; j++) // check if lines A_indices[i] and A_indices[j] overlap
-				// row A_indices[i], word A_indices[j]/64 gives the right 64-bit word, right-shifting by A_indices[j]%64 moves the target bit to position 0.
-				if ((overlaps_AA[(long long)A_indices[i] * rows_A + A_indices[j] / 64] >> (A_indices[j] % 64)) & 1) // AND with 1 isolates bit: result is 1 if they overlap, 0 if not.
+				if (linesIntersect(cand_masks_A[A_indices[i]], cand_masks_A[A_indices[j]]))
 					solver.clause(-(i + 1), -(j + 1)); // at most one of SAT var i+1, var j+1 may be chosen
  
 	if (trans_B < order)
 		for (int i = 0; i < B_count; i++)
 			for (int j = i + 1; j < B_count; j++)
-				if ((overlaps_BB[(long long)B_indices[i] * rows_B + B_indices[j] / 64] >> (B_indices[j] % 64)) & 1)
+				if (linesIntersect(cand_masks_B[B_indices[i]], cand_masks_B[B_indices[j]]))
 					solver.clause(-(i + 1 + A_count), -(j + 1 + A_count));
 
 #if TRACK_TIME == 1
