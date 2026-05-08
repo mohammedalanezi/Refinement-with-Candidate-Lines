@@ -7,6 +7,15 @@ TARGET_ASSUME = $(TARGET)_assumption
 SRC = $(TARGET).cpp
 SRC_ASSUME = $(TARGET)_assumption.cpp
 
+TARGET_ACC = all_candidate_encoding
+SRC_ACC    = all_candidate_encoding.cpp
+
+# libexact setup
+EXACTDIR = libexact-1.0
+EXACT_OBJS = $(EXACTDIR)/exact.o $(EXACTDIR)/util.o
+TARGET_LIBEXACT = refinement_from_partial_list_libexact
+SRC_LIBEXACT = refinement_from_partial_list_libexact.cpp
+
 # Include directories
 INCLUDES = -I../cadical-exhaust-master/src -I. -I$(EXACTDIR)
 
@@ -37,14 +46,39 @@ multi:
 	$(MULTI_THREAD) $(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
 
 assume:
-	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o $(TARGET_ASSUME) $(SRC_ASSUME) \
+	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o $(TARGET_ASSUME) exhaustive_alt.hpp $(SRC_ASSUME) \
 	$(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
 
 asan:
 	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_ASAN) -o $(TARGET_ASAN) $(SRC) \
 	$(LDFLAGS_BASE) $(LDFLAGS_ASAN)
 
+test:
+	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o test_assumption exhaustive_alt.hpp emptypropagator.hpp test_assumption.cpp \
+	$(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
+
+acc:
+	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o $(TARGET_ACC) $(SRC_ACC) \
+	$(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
+
+
+# Compile libexact object files
+$(EXACTDIR)/exact.o: $(EXACTDIR)/exact.c $(EXACTDIR)/exact.h $(EXACTDIR)/util.h
+	$(CC) $(CFLAGS) -I$(EXACTDIR) -c -o $@ $(EXACTDIR)/exact.c
+
+$(EXACTDIR)/util.o: $(EXACTDIR)/util.c $(EXACTDIR)/util.h
+	$(CC) $(CFLAGS) -I$(EXACTDIR) -c -o $@ $(EXACTDIR)/util.c
+
+# Build the libexact-based executable
+libexact: $(TARGET_LIBEXACT)
+
+$(TARGET_LIBEXACT): $(SRC_LIBEXACT) $(EXACT_OBJS)
+	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o $@ $(SRC_LIBEXACT) $(EXACT_OBJS) $(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
+
+
 clean:
-	rm -f $(TARGET) $(TARGET_ASAN) $(TARGET_MULTI)
+	rm -f $(TARGET) $(TARGET_ASAN) $(TARGET_MULTI) $(TARGET_LIBEXACT)
+	rm -f $(EXACT_OBJS)
+
 
 .PHONY: all single multi asan clean
