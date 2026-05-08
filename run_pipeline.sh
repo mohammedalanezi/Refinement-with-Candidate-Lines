@@ -29,7 +29,7 @@ TEMPLATE_ID="$1"
 
 # Solution file is placed alongside the SAT1 script so both programs resolve it the same way.
 SOLUTION_FILE="${TEMPLATE_ID}-${OBSERVE_A}-${OBSERVE_B}-${COMMON_TRANSVERSALS}-solutions.txt"
-SOLUTION_PATH="$SCRIPT_DIR/$SOLUTION_FILE" # could we smart to change this to home path so WSL read/write overhead is avoided
+SOLUTION_PATH="$SCRIPT_DIR/$SOLUTION_FILE" # could be smart to change this to home path so WSL read/write overhead is avoided
 
 SAT1_LOG="$(mktemp)" # Temporary file to capture SAT1 stdout for timing extraction
 trap 'rm -f "$SAT1_LOG"' EXIT
@@ -61,22 +61,6 @@ if [[ "$SAT1_EXIT" -ne 0 ]]; then
     echo "ERROR: SAT 1 exited with code $SAT1_EXIT, aborting pipeline."
     exit "$SAT1_EXIT"
 fi
-
-# --- Clean duplicate lines ---
-DEDUP_START=$(date +%s%N)
-echo ">>> Deduplicating solution file ..."
-if [[ -s "$SOLUTION_PATH" ]]; then
-    sort -u "$SOLUTION_PATH" -o "$SOLUTION_PATH"
-else
-    echo "WARNING: Solution file empty, nothing to deduplicate."
-fi
-
-DEDUP_END=$(date +%s%N)
-DEDUP_WALL=$(echo "scale=3; ($DEDUP_END - $DEDUP_START) / 1000000000" | bc)
-
-echo "------------------------------------------------------------"
-echo ">>> Dedup finished  (wall time: ${DEDUP_WALL}s)"
-echo
 
 if [[ ! -s "$SOLUTION_PATH" ]]; then
     echo "WARNING: Solution file is empty or missing, SAT 2 may find nothing."
@@ -110,7 +94,7 @@ echo "------------------------------------------------------------"
 echo
 
 # ---- Total -------------------------------------------------
-TOTAL_WALL=$(echo "scale=3; $SAT1_WALL + $DEDUP_WALL + $SAT2_WALL" | bc)
+TOTAL_WALL=$(echo "scale=3; $SAT1_WALL + $SAT2_WALL" | bc)
 
 # ============================================================
 echo "============================================================"
@@ -119,7 +103,6 @@ echo " Solution file: $SOLUTION_FILE"
 echo "============================================================"
 echo " TOTAL PIPELINE TIMING"
 echo "   SAT 1 wall time : ${SAT1_WALL}s"
-echo "   Dedup wall time : ${DEDUP_WALL}s"
 echo "   SAT 2 wall time : ${SAT2_WALL}s"
 echo "   Total wall time : ${TOTAL_WALL}s"
 echo "============================================================"
