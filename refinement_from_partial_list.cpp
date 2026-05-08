@@ -55,7 +55,6 @@ int* all_line_indices_B = nullptr;
 
 long skipped_partial_solutions = 0;
 long partial_count = 0;
-long duplicate_partial_count = 0;
 int count_A = 0;
 int count_B = 0;
 
@@ -643,8 +642,7 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
 	timer = chrono::steady_clock::now();
 #endif
 
-	{
-		// stack-allocated flat buffer of (point, var) pairs: one entry per set bit across all filtered candidates.
+	if (trans_A < order) {	// stack-allocated flat buffer of (point, var) pairs: one entry per set bit across all filtered candidates.
 		int* buf_point = (int*)alloca(A_count * order * sizeof(int));
 		int* buf_var   = (int*)alloca(A_count * order * sizeof(int));
 		int  buf_len   = 0;
@@ -692,7 +690,7 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
 		}
 	}
  
-	{ // Same for B.
+	if (trans_B < order) { // Same for B.
 		int* buf_point = (int*)alloca(B_count * order * sizeof(int));
 		int* buf_var   = (int*)alloca(B_count * order * sizeof(int));
 		int  buf_len   = 0;
@@ -1082,7 +1080,7 @@ int main(int argc, char* argv[]) {
 	
 	cout << "=== FINAL RESULTS FOR TEMPLATE " << template_id - 1 << " ===\n";
 	cout << "Total refinements found: " << total_refinements << endl;
-	cout << "Partial solutions processed: " << partial_count << " (" << skipped_partial_solutions << " skipped)" << " (+" << duplicate_partial_count << " duplicates)" << endl;
+	cout << "Partial solutions processed: " << partial_count << " (" << skipped_partial_solutions << " skipped)" << endl;
 	cout << "Time elapsed: " << elapsed << " seconds\n";
 	cout << "Throughput: " << (partial_count / elapsed) << " solutions/sec\n";
 	cout << "File: " << solution_file << endl;
