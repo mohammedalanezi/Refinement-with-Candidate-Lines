@@ -18,8 +18,8 @@ parent_dir = os.path.dirname(script_dir)
 exhaust_satsolver_path = os.path.join(parent_dir, "cadical-exhaust-master", "build", "cadical-exhaust")
 satsolver_path = os.path.join(parent_dir, "kissat-rel-4.0.2", "build", "kissat")
 
-if len(sys.argv) < 7:
-    print("Usage: python3 all_net_encoding.py <solution file name> <template_id> <symbol transversals (1-10)> <partial on A (1/0)> <partial on B (1/0)> <common disjoint transversals (0-10)> <common transversals>\n")
+if len(sys.argv) < 6:
+    print("Usage: python3 all_net_encoding.py <solution file name> <template_id> <symbol transversals on A (0-10)> <symbol transversals on B (0-10)> <common disjoint transversals (0-10)> <common transversals>\n")
     sys.exit(1)
 
 solution_file = sys.argv[1]
@@ -32,18 +32,17 @@ variable_counts = {}
 latin_squares = 3
 
 observed = []
-observed_syms = int(sys.argv[3]) # do partial solution on these symbol transversals
-observe_A = int(sys.argv[4]) == 1 #Q
-observe_B = int(sys.argv[5]) == 1 #Z
-num_common_transversals = int(sys.argv[6])
+observed_syms_A = int(sys.argv[3]) # do partial solution on these symbol transversals for A
+observed_syms_B = int(sys.argv[4]) # do partial solution on these symbol transversals for A
+num_common_transversals = int(sys.argv[5])
 
 template_path = os.path.join(parent_dir, "refinements and candidate lines", "templates", str(template_id)+"-template.txt")
 
-if observe_A == False and observe_B == False:
-	print("No partial MOLS observed, ensure that the partial solution contains at least one square.")
+if observed_syms_A > 10 or observed_syms_B > 10:
+	print("Too many symbols in the latin squares are observed, ensure that at most 10 symbols are observed in either latin square.")
 	sys.exit(1)
-if observed_syms <= 0:
-	print("No symbols transversals being observed, ensure that we are observing at least one symbol.")
+if observed_syms_A <= 0 and observed_syms_B <= 0:
+	print("No symbols transversals being observed, ensure that we are observing at least one symbol from either latin square.")
 	sys.exit(1)
 
 # FOR JUST PARTIAL SOLUTIONS OVER As SET observe_A = True, observe_B = False, and observed_syms = order
@@ -65,7 +64,7 @@ def get4DIndex(index):
 	return tuple[0], tuple[1] - 1, tuple[2] - 1, tuple[3] - 1
 
 def runEncoding(can_forget=False, suffix=""):
-	filename = f"{template_id}-{observed_syms}-{observe_A}-{observe_B}"
+	filename = f"{template_id}-{observed_syms_A}-{observed_syms_B}-{num_common_transversals}"
 	if suffix != "":
 		filename += f"-{suffix}"
 	input_path = os.path.join(script_dir, f"{filename}-input.cnf")
@@ -140,7 +139,7 @@ def runEncoding(can_forget=False, suffix=""):
 					for s in range(4):
 						encoding.add_clause([-symbols[row][col][s]])
 
-	if num_common_transversals > 0:
+	if num_common_transversals > 0: # Seems to only be viable in cases where we 100% know that we have transversals in A and B
 		# transversal_sym_in_Z[k][j][s] = True -> the cell that Q assigns symbol k in column j has symbol s in Z
 		transversal_sym_in_Z = [[[encoding.new_variable() for s in range(order)] for j in range(order)] for k in range(order)]
 		# We only need this auxiliary for Z (Q's own variables already define the transversal)
@@ -177,13 +176,15 @@ def runEncoding(can_forget=False, suffix=""):
 	encoding.finalize_encoding()
 	print(encoding)
 
-	for s in range(observed_syms):
+	for s in range(observed_syms_A):
 		for r in range(order):
 			for c in range(order):
-				if observe_A:
-					observed.append(Q[r][c][s])
-				if observe_B:
-					observed.append(Z[r][c][s])	
+				observed.append(Q[r][c][s])
+
+	for s in range(observed_syms_B):
+		for r in range(order):
+			for c in range(order):
+				observed.append(Z[r][c][s])
 
 	observed_string = " ".join(map(str, observed))
 	forget = []
@@ -196,7 +197,7 @@ def runEncoding(can_forget=False, suffix=""):
 	wall_time = decoding.run_sat_solver(
 		exhaust_satsolver_path, 
 		input_path,
-		forget + ["--solfile", solution_path, "--observe"] + observed_string.split(), # + ["-t", "4"]
+		forget + ["--solfile", solution_path, "--observe"] + observed_string.split(), #+ ["--inprocessing=false"], # + ["-t", "4"]
 		True,
 	)
 
@@ -207,9 +208,12 @@ def runEncoding(can_forget=False, suffix=""):
 	print(f"Timings: {decoding.timings}")
 		
 if __name__ == "__main__":
-	runEncoding(True, "can_forget with inprocessing")
+	runEncoding(True, "can_forget with inprocessing off")
 	# TODO: maybe make a clean up helper function and run it in runEncoding when forget is True
 
-# inprocessing off is faster than inprocessing on
 # forget flag present is faster than forget flag not present, but results in more solutions (as expected)
-# 	fastest combination is with inprocessing off and can-forget on
+# 	fastest combination is with inprocessing on and can-forget on
+#   I think inprocessing off is only faster than inprocessing on when can-forget is false
+
+	
+# TODO: need to update external propagator to write to solution file only the non duplicate solutions, e.g. using my hashing algorithm instead of run_pipeline's slow duplication removal
