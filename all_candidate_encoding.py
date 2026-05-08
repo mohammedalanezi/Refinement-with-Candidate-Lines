@@ -1,12 +1,3 @@
-'''
-Workers Candidate Encoding by Mohammed
-
-Parallel processing version for exhaustive SAT solutions
-Processes each A refinement in parallel to find all valid Bs refinements
-
-Code is not the best! This is my first time doing parallel processing in Python!
-'''
-
 import os
 import sys
 import time
