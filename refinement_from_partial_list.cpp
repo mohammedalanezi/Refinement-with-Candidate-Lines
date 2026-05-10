@@ -296,7 +296,7 @@ void solutionToCandidateLines(const int* solution, const int& solution_count, __
  *    (both transposes of each other, allows us row-major access from either direction).
  *
  * With ~14k lines per side, intersects_once_AB/BA are ~24MB each. 
- * All four fit in L3 cache, keeping the bit lookups fast across all tens of millions of calls.
+ * Both fit in L3 cache, keeping the bit lookups fast across all tens of millions of calls.
  *
  * Also initialises:
  * 
@@ -587,7 +587,7 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
 	solver.set("factor", 0);
 	solver.set("factorcheck", 0);
 	solver.set("inprocessing", 0);
-	//solver.resize(A_count + B_count); // experimental: for 3.0
+	solver.resize(A_count + B_count);
 
 	for(int i = 0; i < trans_A; i++)
 		solver.clause(i+1);
@@ -729,7 +729,7 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
 	timer = chrono::steady_clock::now();
 #endif
 
-	ExhaustiveSearch propagator(&solver, observed, true, nullptr, false, OUTPUT_SOLUTIONS);	
+	ExhaustiveSearch propagator(&solver, {.to_observe = observed, .only_neg = true, .track_solutions = OUTPUT_SOLUTIONS});	
 
 	int result = solver.solve();
 	long int sol_count = propagator.get_solution_count();
@@ -913,7 +913,7 @@ int main(int argc, char* argv[]) {
 	if (argc < 3) {
 		cerr << "Usage: " << argv[0] << " <template_id> <file_name>\n";
 		return 1;
-	}
+	} // TODO: add warning if directory is not set up correctly
 
 	int template_id = atoi(argv[1]) + 1;
 	string solution_file = argv[2];

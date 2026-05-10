@@ -465,39 +465,27 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
 
 	exact_t* e = exact_alloc();
 
-	// 1. declare rows: 100 grid points for A (rows 1...100) and 100 for B (rows 101...200)
+	// 1. declare rows: 100 grid points for B
 	for (int p = 0; p < order * order; p++) { // each point must be covered by exactly one line in its respective square
 		exact_declare_row(e, p + 1, 1);
-		exact_declare_row(e, order * order + p + 1, 1);
 	}
 
-	// 2. declare columns: A candidate lines (colmum IDs 1...A_count) then B candidate lines (A_count+1...A_count+B_count)
-	for (int i = 0; i < A_count; i++)
+	// 2. declare columns: B candidate lines (colmum IDs 1...B_count)
+	for (int i = 0; i < B_count; i++)
 		exact_declare_col(e, i + 1, 1);
-	for (int j = 0; j < B_count; j++)
-		exact_declare_col(e, A_count + j + 1, 1);
 
 #if TRACK_TIME == 1
 	double creation_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 	timer = chrono::steady_clock::now();
 #endif
 
-	// 3. declare entries for A lines: for each A candidate, record which grid points it covers
-	for (int i = 0; i < A_count; i++) {
-		__uint128_t mask = cand_masks_A[A_indices[i]];
+	// 3. declare entries for B lines: for each B candidate, record which grid points it covers
+	for (int i = 0; i < B_count; i++) {
+		__uint128_t mask = cand_masks_B[B_indices[i]];
 		uint64_t lo = (uint64_t)mask;
 		uint64_t hi = (uint64_t)(mask >> 64);
 		while (lo) { int b = __builtin_ctzll(lo); exact_declare_entry(e, b + 1, i + 1); lo &= lo - 1; }
 		while (hi) { int b = __builtin_ctzll(hi); exact_declare_entry(e, 64 + b + 1, i + 1); hi &= hi - 1; }
-	}
-
-	// 4. declare entries for B lines: same as A, but row IDs are offset by order*order
-	for (int j = 0; j < B_count; j++) {
-		__uint128_t mask = cand_masks_B[B_indices[j]];
-		uint64_t lo = (uint64_t)mask;
-		uint64_t hi = (uint64_t)(mask >> 64);
-		while (lo) { int b = __builtin_ctzll(lo); exact_declare_entry(e, order * order + b + 1, A_count + j + 1); lo &= lo - 1; }
-		while (hi) { int b = __builtin_ctzll(hi); exact_declare_entry(e, order * order + 64 + b + 1, A_count + j + 1); hi &= hi - 1; }
 	}
 
 #if TRACK_TIME == 1
@@ -505,7 +493,7 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
 	timer = chrono::steady_clock::now();
 #endif
 
-	// 5. enumerate all solutions: each solution is a valid (A partition, B partition) pair
+	// 4. enumerate all solutions: each solution is a valid B square
 	int soln_size;
 	const int* soln;
 	long int sol_count = 0;
@@ -642,7 +630,7 @@ int main(int argc, char* argv[]) {
 	if (argc < 3) {
 		cerr << "Usage: " << argv[0] << " <template_id> <file_name>\n";
 		return 1;
-	}
+	} // TODO: add warning if directory is not set up correctly
 
 	int template_id = atoi(argv[1]) + 1;
 	string solution_file = argv[2];
