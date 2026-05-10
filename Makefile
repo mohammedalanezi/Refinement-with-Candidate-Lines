@@ -3,12 +3,7 @@ CXX = g++
 TARGET = refinement_from_partial_list
 TARGET_ASAN = $(TARGET)_asan
 TARGET_MULTI = $(TARGET)_mt
-#TARGET_ASSUME = $(TARGET)_assumption
 SRC = $(TARGET).cpp
-#SRC_ASSUME = $(TARGET)_assumption.cpp
-
-#TARGET_ACC = all_candidate_encoding
-#SRC_ACC    = all_candidate_encoding.cpp
 
 TARGET_COMPLETE = template_to_all_refinements
 SRC_COMPLETE = $(TARGET_COMPLETE).cpp
@@ -48,21 +43,9 @@ multi:
 	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o $(TARGET_MULTI) $(SRC) \
 	$(MULTI_THREAD) $(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
 
-#assume:
-#	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o $(TARGET_ASSUME) exhaustive_alt.hpp $(SRC_ASSUME) \
-#	$(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
-
 asan:
 	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_ASAN) -o $(TARGET_ASAN) $(SRC) \
 	$(LDFLAGS_BASE) $(LDFLAGS_ASAN)
-
-#test:
-#	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o test_assumption exhaustive_alt.hpp emptypropagator.hpp test_assumption.cpp \
-#	$(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
-
-#acc:
-#	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o $(TARGET_ACC) $(SRC_ACC) \
-#	$(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
 
 # Compile libexact object files
 $(EXACTDIR)/exact.o: $(EXACTDIR)/exact.c $(EXACTDIR)/exact.h $(EXACTDIR)/util.h
