@@ -216,4 +216,4 @@ if __name__ == "__main__":
 #   I think inprocessing off is only faster than inprocessing on when can-forget is false
 
 	
-# TODO: need to update external propagator to write to solution file only the non duplicate solutions, e.g. using my hashing algorithm instead of run_pipeline's slow duplication removal
+# TODO: need to update external propagator to write to solution file only the non duplicate solutions, e.g. using my hashing algorithm
