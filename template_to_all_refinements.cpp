@@ -30,19 +30,16 @@
 // ---------------------------------------------------------------
 // Cubing backend selector
 //
-//   USE_MARCH_CU 1  ->  shell out to march_cu (Curtis Bright's CnC fork)
-//                       uses -r (free-vars-to-remove) and -m (max var index)
+//   USE_MARCH_CU 1  ->  shell out to march_cu (Curtis Bright's CnC fork) uses -r (free vars to remove) and -m (max var index)
 //                       to restrict branching to square Q only (vars 1-1000).
-//                       Path is set via g_march_cu_path in main().
 //
-//   USE_MARCH_CU 0  ->  use CaDiCaL's built-in generate_cubes(depth)
-//                       controlled by the depth parameter passed to runEncoding.
+//   USE_MARCH_CU 0  ->  use CaDiCaL's built-in generate_cubes(depth) controlled by the depth parameter passed to runEncoding.
 // ---------------------------------------------------------------
 #define USE_MARCH_CU    1
 
 // Number of free variables march_cu removes before emitting a cube (-r param).
 // Increase this to get more cubes (each harder cube). Tune until each cube solves in seconds to low minutes.
-#define CUBE_R_PARAM    20
+#define CUBE_R_PARAM    20  // seems to be the fastest time after naive testing of various values between 5 and 50
 
 using namespace std;
 
@@ -181,9 +178,9 @@ void encodeLatinSquare(CaDiCaL::Solver& solver, int sq) {
 //
 //   p = P[i'][j][k]   z = Z[i][j][i']   q = Q[i][j][k]
 //
-//   (z ∧ p) -> q   ⟺   -z ∨ -p ∨  q
-//   (z ∧ q) -> p   ⟺   -z ∨ -q ∨  p
-//   (p ∧ q) -> z   ⟺   -p ∨ -q ∨  z
+//   (z ∧ p) -> q   <=>   -z ∨ -p ∨  q
+//   (z ∧ q) -> p   <=>   -z ∨ -q ∨  p
+//   (p ∧ q) -> z   <=>   -p ∨ -q ∨  z
 // ---------------------------------------------------------------
 
 void encodeMyrvoldOrthogonality(CaDiCaL::Solver& solver) {
@@ -642,25 +639,3 @@ int main(int argc, char* argv[]) {
 
 	return 0;
 }
-
-/*
-
-TODO: figure out a way to print CPU times, all of these are WALL times (CaDiCaL::Terminator or expose solver->internal somehow? i think its private so id need to expose it again)
-
-TODO: make get_refinements check the transversals in A and B:
-	If (A == 0 and B == 0) then stop early and return 0
-	If (A == 0 and B == order) or (B == order and A == 0) then only create half the constraints (can do this by setting the one with transverals as A and the other as B)
-	else create the full constraints
-
-TODO: *summary python script, takes in log Id and number of logs, the gets median, average and mode of the logs
-	A log is simply a txt file of the results
-
-@mogaming 
-fri:
-	*recode summary script with built in RANDOMIZED SEED, i think the default seed is always 0
-	run compute canada
-	1a. need to be able to get all templates individually on compute canada
-	1b. need to be able to refine templates into candidate lines individually on compute canada
-	meeting
-
-*/
