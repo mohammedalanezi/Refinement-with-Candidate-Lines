@@ -188,7 +188,7 @@ void encodeMyrvoldOrthogonality(CaDiCaL::Solver& solver) {
 // ---------------------------------------------------------------
 // Main encoding and solving routine
 // ---------------------------------------------------------------
-struct FastPolicy {
+struct FastPolicy { 
 	mutable __uint128_t sym_points[order] 	= { 0 };
 	mutable int sym_cnt[order] 				= { 0 }; // popcount of each mask
 	mutable int sym_A_idx[order] 			= { -1 }; // index in cand_hash_A, or -1 if not complete

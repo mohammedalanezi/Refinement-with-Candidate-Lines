@@ -1,12 +1,8 @@
 CXX = g++
 
-TARGET = refinement_from_partial_list
-TARGET_ASAN = $(TARGET)_asan
-TARGET_MULTI = $(TARGET)_mt
-SRC = $(TARGET).cpp
-
-TARGET_COMPLETE = template_to_all_refinements
-SRC_COMPLETE = $(TARGET_COMPLETE).cpp
+TARGET_COMPLETE      = template_to_all_refinements
+TARGET_COMPLETE_ASAN = $(TARGET_COMPLETE)_asan
+SRC_COMPLETE         = $(TARGET_COMPLETE).cpp
 
 # libexact setup
 EXACTDIR = libexact-1.0
@@ -19,33 +15,21 @@ INCLUDES = -I../cadical-exhaust-master/src -I. -I$(EXACTDIR)
 
 # Greatest common flags
 CXXFLAGS_BASE = -std=c++20 -pipe $(INCLUDES)
-MULTI_THREAD  = -pthread -fopenmp
 
 # Link CaDiCaL
 LDFLAGS_BASE = ../cadical-exhaust-master/build/libcadical.a
 
 # ===== Release build (for benchmarking) =====
-CXXFLAGS_RELEASE = -O3 -DNDEBUG
-LDFLAGS_RELEASE  =
+CXXFLAGS_RELEASE = -O3 -march=native -DNDEBUG
+LDFLAGS_RELEASE  = -flto
 
 # ===== ASan build (for testing) =====
-CXXFLAGS_ASAN = -O1 -g -fsanitize=address -fno-omit-frame-pointer -fno-lto
-LDFLAGS_ASAN  = -fsanitize=address
+CXXFLAGS_ASAN = -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
+                -fno-optimize-sibling-calls -fno-lto
+LDFLAGS_ASAN  = -fsanitize=address,undefined -fno-lto
 
 # Default target
-all: single
-
-single:
-	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o $(TARGET) $(SRC) \
-	$(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
-
-multi:
-	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o $(TARGET_MULTI) $(SRC) \
-	$(MULTI_THREAD) $(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
-
-asan:
-	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_ASAN) -o $(TARGET_ASAN) $(SRC) \
-	$(LDFLAGS_BASE) $(LDFLAGS_ASAN)
+all: complete
 
 # Compile libexact object files
 $(EXACTDIR)/exact.o: $(EXACTDIR)/exact.c $(EXACTDIR)/exact.h $(EXACTDIR)/util.h
@@ -61,8 +45,12 @@ libexact: $(SRC_LIBEXACT) $(EXACT_OBJS)
 complete: $(SRC_COMPLETE) $(EXACT_OBJS) libexact_partial_solution_refinement.cpp
 	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o $(TARGET_COMPLETE) $(SRC_COMPLETE) $(EXACT_OBJS) $(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
 
+asan: $(SRC_COMPLETE) $(EXACT_OBJS) libexact_partial_solution_refinement.cpp
+	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_ASAN) -o $(TARGET_COMPLETE_ASAN) $(SRC_COMPLETE) $(EXACT_OBJS) \
+	$(LDFLAGS_BASE) $(LDFLAGS_ASAN)
+
 clean:
-	rm -f $(TARGET) $(TARGET_ASAN) $(TARGET_MULTI) $(TARGET_LIBEXACT) $(TARGET_COMPLETE)
+	rm -f $(TARGET_COMPLETE) $(TARGET_COMPLETE_ASAN) $(TARGET_LIBEXACT)
 	rm -f $(EXACT_OBJS)
 
-.PHONY: all single multi asan libexact complete clean
+.PHONY: all asan libexact complete clean

@@ -569,7 +569,7 @@ bool solve_partial_solution(const int sym_A_idx[order]) {
     return true;
 }
 
-void print_substep_timings_log(double creation_time, 
+void print_substep_timings_log(double creation_time,
 		double total_minimize_convert, double total_minimize_cleanup, double total_minimize_remove,
 		double total_cube_gen_time, double total_cube_creation_time, double total_cube_solve_time) {
 	double elapsed = chrono::duration<double>(chrono::steady_clock::now() - start_time).count();
