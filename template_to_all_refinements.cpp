@@ -1,21 +1,9 @@
-/**
- * all_net_encoding.cpp
- *
- * C++ port of all_net_encoding.py by Mohammed Al-Anezi.
- *
- * Builds a SAT instance encoding three mutually orthogonal Latin squares
- * (Q, Z, P of order 10) with template-based symmetry breaking and Gill
- * parity constraints, then exhaustively enumerates all valid (A, B) pairs
- * by observing the symbol-transversal variables of Q and Z.
- *
- * Usage:
- *   ./all_net_encoding <template_id> <observed_syms_A (0-10)> <observed_syms_B (0-10)>
- */
 
 #include <iostream>
 #include <fstream>
 #include <sstream>
 #include <vector>
+#include <span>
 #include <string>
 #include <chrono>
 #include <cstdlib>
@@ -25,23 +13,14 @@
 #include "exhaustive.hpp"
 
 #define MULTI_THREADING 0 // if I wanna add multi threading to substep then i need a worker and pool system
-#define CUBE_CONQUER    1
+#define COPY_MODE 1 // copy (1) faster than assumption mode (0) since we don't encounter clause poisoning, this is unknown for massively larger templates (e.g. 4) 
+#define FULL_DUMP 0 // if we dump irredundant clauses/unit clauses to march_cu
+#define MAX_CUBES 0 // maximum cubes we process, infinite when <=0 (11), this is for early termination
 
-// ---------------------------------------------------------------
-// Cubing backend selector
-//
-//   USE_MARCH_CU 1  ->  shell out to march_cu (Curtis Bright's CnC fork) uses -r (free vars to remove) and -m (max var index)
-//                       to restrict branching to square Q only (vars 1-1000).
-//
-//   USE_MARCH_CU 0  ->  use CaDiCaL's built-in generate_cubes(depth) controlled by the depth parameter passed to runEncoding.
-// ---------------------------------------------------------------
-#define USE_MARCH_CU    1
+#define CANEARLY 0
+#define MINIMIZE 0
 
-// Number of free variables march_cu removes before emitting a cube (-r param).
-// Increase this to get more cubes (each harder cube). Tune until each cube solves in seconds to low minutes.
-#define CUBE_R_PARAM    20  // seems to be the fastest time after naive testing of various values between 5 and 50
-
-using namespace std;
+using namespace std; 
 
 // ---------------------------------------------------------------
 // Constants
@@ -54,9 +33,28 @@ const int latin_squares = 3;
 // max variable index for square Q (sq=0): vars 1 ... order^3, sent to march_cu's -m flag so it only branches on Q's variables
 const int Q_MAX_VAR = order * order * order;  // = 1000
 
-double creation_time = 0.0f;
+double init_creation_time = 0.0f;
+double total_cube_creation_time = 0.0f;
+double total_cube_solve_time = 0.0f;
+double total_cube_gen_time = 0.0f;
 
+double total_minimize_convert = 0.0;
+double total_minimize_cleanup = 0.0;
+double total_minimize_remove = 0.0;
+
+bool cube_solver_created = false;
+int cube_count = 0;
+long early_blocks = 0;
+long early_blocks_total = 0;
+
+CaDiCaL::Solver solver;
+ExhaustiveSearchOptions opts;
 string g_march_cu_path; // Path to the march_cu binary; set in main() from march_cu_dir.
+
+// Number of free variables march_cu removes before emitting a cube (-r param).
+// Increase this to get more cubes (each harder cube). We wait to solve each cube in a couple minutes at most but not too fast where creation/destruction of cadical slows it down.
+int CUBE_R_PARAM = 20; // (when we rebuild a solver for each cube) 20 seems to be the fastest time after naive testing of various values between 5 and 50
+int CUBE_LIMIT = 0; // Max number of cubes that will be solved
 
 #include "libexact_partial_solution_refinement.cpp"
 
@@ -116,20 +114,6 @@ vector<vector<vector<int>>> unloadTemplate(const string& path) {
 		++line_no;
 	}
 	return tmpl;
-}
-
-// ---------------------------------------------------------------
-// Clause helpers
-// ---------------------------------------------------------------
-
-static inline void add_clause(CaDiCaL::Solver& solver, initializer_list<int> lits) {
-	for (int l : lits) solver.add(l);
-	solver.add(0);
-}
-
-static inline void add_clause(CaDiCaL::Solver& solver, const vector<int>& lits) {
-	for (int l : lits) solver.add(l);
-	solver.add(0);
 }
 
 // ---------------------------------------------------------------
@@ -204,37 +188,128 @@ void encodeMyrvoldOrthogonality(CaDiCaL::Solver& solver) {
 // ---------------------------------------------------------------
 // Main encoding and solving routine
 // ---------------------------------------------------------------
-#if CUBE_CONQUER == 0 || USE_MARCH_CU == 1
-struct FastSolutionProcessor {
-	FastSolutionProcessor() {}
-	void operator()(const std::vector<int>& solution) const {
-		solve_partial_solution(solution);
-	}
+struct FastPolicy {
+	mutable __uint128_t sym_points[order] 	= { 0 };
+	mutable int sym_cnt[order] 				= { 0 }; // popcount of each mask
+	mutable int sym_A_idx[order] 			= { -1 }; // index in cand_hash_A, or -1 if not complete
+	mutable __uint128_t cached_union_B 		= 0;// cached OR of all surviving B masks
+	mutable bool union_B_valid 				= false;    // cache validity flag
+	mutable int line_count 					= 0;
+	
 	explicit operator bool() const { return true; }
-};
-#elif CUBE_CONQUER == 1 && USE_MARCH_CU == 0
-struct FastSolutionProcessor {
-	long long &global_solution_count;          // shared counter
-	std::unordered_set<uint64_t> *global_seen;
 
-	// Constructor
-	FastSolutionProcessor(long long &counter, std::unordered_set<uint64_t> *dedup = nullptr) : global_solution_count(counter), global_seen(dedup) {}
+	void notify_assignment(int var, int lit) const {
+		if (var > order * order * order || lit < 0) // only sq=0, only pos lits and unassignments
+			return;
 
-	// Called for every partial solution found inside a cube
-	void operator()(const std::vector<int>& sol) const {
-		// Cross-cube deduplication (only if a set is provided)
-		if (global_seen) {
-			uint64_t h = es_wyhash(sol.data(), sol.size() * sizeof(int), 0x517cc1b727220a95ULL);
-			if (!global_seen->insert(h).second)
-				return;   // duplicate – skip counting and refinement
+		const VarInfo& vi = var_lookup[var];
+		if (vi.sq != 0) return; // only square Q
+
+		int point = vi.r * order + vi.c + 1; // 1‑based
+		int s     = vi.s;
+		__uint128_t bit = (__uint128_t)1 << (point - 1); // bit 0...(order*order-1)
+		
+    	bool was_complete = (sym_cnt[s] == order);
+
+		if (lit > 0) { // assign: set bit if not already set
+			if (!(sym_points[s] & bit)) {
+				sym_points[s] |= bit;
+				++sym_cnt[s];
+			}
+		} else if (lit == 0) { // retract: clear bit if set
+			if (sym_points[s] & bit) {
+				sym_points[s] &= ~bit;
+				--sym_cnt[s];
+			}
 		}
-		++global_solution_count;
-		solve_partial_solution(sol);
+
+    	bool now_complete = (sym_cnt[s] == order);
+
+		if (now_complete && !was_complete) {
+			auto it = cand_hash_A.find(sym_points[s]);
+			sym_A_idx[s] = (it != cand_hash_A.end()) ? it->second : -1;
+			union_B_valid = false;  
+			line_count++;
+		} else if (!now_complete && was_complete) {
+			sym_A_idx[s] = -1;
+			union_B_valid = false;
+			line_count--;
+		}
+	}
+	static constexpr bool notifyAssignment = true;
+	bool operator()(const std::vector<int>& solution) const {
+		return solve_partial_solution(sym_A_idx);
 	}
 
-	explicit operator bool() const { return true; }
-};
+	void reset() const {
+		cout << "Reset\n";
+		memset(sym_points, 0, sizeof(sym_points));
+		memset(sym_cnt, 0, sizeof(sym_cnt));
+		memset(sym_A_idx, -1, sizeof(sym_A_idx));
+    	cached_union_B = 0;
+    	union_B_valid = false;
+	}
+
+	FastPolicy() { reset(); }
+
+#if CANEARLY == 1 || MINIMIZE == 1
+	bool is_partial_solution(const std::vector<int>& pos_vars) const { 
+		if (line_count <= 0) return false; // too early to check
+		
+		if (!union_B_valid) {
+			cached_union_B = 0;
+			getIntersectingBCovering(sym_A_idx, cached_union_B);
+			union_B_valid = true;
+		}
+		return cached_union_B == all_points_mask;
+	}
+
+	bool should_early() const {
+		#if CANEARLY == 1
+		return line_count > 5;
+		#else
+		return false;
+		#endif
+	}
+
+	#if MINIMIZE == 1
+	void minimize(std::vector<int>& clause) const {
+		int local_sym_A_idx[order];
+		memcpy(local_sym_A_idx,  sym_A_idx,  sizeof(sym_A_idx));
+
+		std::unordered_set<int> clause_set(clause.begin(), clause.end());
+
+		auto erase_sym_lits = [&](int s, __uint128_t mask) {
+			uint64_t lo = (uint64_t)mask;
+			uint64_t hi = (uint64_t)(mask >> 64);
+			while (lo) { int k = __builtin_ctzll(lo); clause_set.erase(-var(0, k / order, k % order, s)); lo &= lo - 1; }
+			while (hi) { int k = __builtin_ctzll(hi); int kk = k + 64; clause_set.erase(-var(0, kk / order, kk % order, s)); hi &= hi - 1; }
+		};
+
+		for (int s = 0; s < order; ++s)
+			if (local_sym_A_idx[s] > 0) {
+				int saved_index = local_sym_A_idx[s];
+				local_sym_A_idx[s] = -1;
+
+				bool covers = check_partial_solution_covering(local_sym_A_idx);
+				if (covers) {
+					local_sym_A_idx[s] = saved_index;
+				} else { 
+					erase_sym_lits(s, sym_points[s]);
+				}
+			}
+		clause.assign(clause_set.begin(), clause_set.end());
+	}
+	static constexpr bool minimizeClause = true;
+	#else
+	static constexpr bool minimizeClause = false;
+	#endif
+	static constexpr bool earlyClause = true;
+#else
+	static constexpr bool earlyClause = false;
+	static constexpr bool minimizeClause = false;
 #endif
+}; 
 
 // ---------------------------------------------------------------
 // Builds the full formula into 'solver'. 
@@ -312,11 +387,9 @@ int buildFormula(CaDiCaL::Solver& solver, const vector<vector<vector<int>>>& tmp
 }
 
 // ---------------------------------------------------------------
-// Cube generation — two backends selected by USE_MARCH_CU
+// Cube generation
 // ---------------------------------------------------------------
 
-#if CUBE_CONQUER == 1
-	#if USE_MARCH_CU == 1
 // Parses an .icnf cubes file produced by march_cu. Each cube line starts with 'a', contains space-separated literals, ends with 0.
 static vector<vector<int>> parseCubesFile(const string& path) {
 	vector<vector<int>> cubes;
@@ -348,9 +421,9 @@ static vector<vector<int>> parseCubesFile(const string& path) {
 //
 // Temp files are written alongside the template in parent_dir and are
 // named by template_id so parallel array jobs don't collide.
-vector<vector<int>> generateCubes(
-		const vector<vector<vector<int>>>& tmpl,
-		const string& parent_dir, int template_id, int /*cube_depth_unused*/) {
+vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const string& parent_dir, int template_id, int /*cube_depth_unused*/) {
+	auto t0 = chrono::steady_clock::now();
+
 	string cnf_path   = parent_dir + "tmp_t" + to_string(template_id) + ".cnf";
 	string cubes_path = parent_dir + "tmp_t" + to_string(template_id) + "_cubes.icnf";
 
@@ -361,18 +434,33 @@ vector<vector<int>> generateCubes(
 		dumper.set("inprocessing", 0);
 		dumper.set("factor",       0);
 		buildFormula(dumper, tmpl);
+	#if FULL_DUMP == 1
+		int stdout_save = dup(fileno(stdout));
+		freopen(cnf_path.c_str(), "w", stdout);
+		dumper.dump_cnf();
+		fflush(stdout);
+		dup2(stdout_save, fileno(stdout));
+		close(stdout_save);
+	#else
 		dumper.write_dimacs(cnf_path.c_str());
+	#endif
 	}
 
 	// Step 2: shell out to march_cu
 	//   -r CUBE_R_PARAM : stop after removing this many free variables
 	//   -m Q_MAX_VAR    : only branch on vars <= 1000 (square Q)
+	//   -l CUBE_LIMIT 	 : combine cubes up to a maximum amount
 	//   -o cubes_path   : write cubes here
 	ostringstream cmd;
-	cmd << g_march_cu_path << " " << cnf_path << " -r " << CUBE_R_PARAM << " -m " << Q_MAX_VAR << " -o " << cubes_path;
+	cmd << g_march_cu_path
+		<< " " << cnf_path
+		<< " -r " << CUBE_R_PARAM
+		<< " -m " << Q_MAX_VAR;
+	if (CUBE_LIMIT > 0)
+		cmd << " -l " << CUBE_LIMIT;
+	cmd << " -o " << cubes_path;
 
 	cout << "  Running: " << cmd.str() << "\n";
-	auto t0 = chrono::steady_clock::now();
 
 	int ret = system(cmd.str().c_str());
 	double elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
@@ -382,175 +470,97 @@ vector<vector<int>> generateCubes(
 		return {};
 	}
 	cout << "  Cubing time: " << elapsed << "s\n";
+	total_cube_gen_time = elapsed;
 
 	// Step 3: parse the .icnf output
 	auto cubes = parseCubesFile(cubes_path);
 	cout << "  Cubes generated: " << cubes.size() << "\n";
+	cube_count = cubes.size();
 	return cubes;
 }
-	#else // USE_MARCH_CU == 0, use CaDiCaL's built-in lookahead cuber
-// Generates cubes using CaDiCaL's generate_cubes(depth).
-// NOTE: depth-based splitting can produce unbalanced cubes. Prefer the march_cu backend (-r param) for production runs.
-vector<vector<int>> generateCubes(
-		const vector<vector<vector<int>>>& tmpl,
-		const string& /*parent_dir_unused*/,
-		int /*template_id_unused*/,
-		int cube_depth)
-{
-	cout << "  Cubing phase (CaDiCaL, depth=" << cube_depth << ")...\n";
+
+// ---------------------------------------------------------------
+// Solves a single cube: reuses central solver, adds cube as assumption literals, then runs the exhaustive enumeration.
+// ---------------------------------------------------------------
+#if COPY_MODE == 0
+long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int>& cube,
+						const int& cube_index, ExhaustiveSearch<FastPolicy>& propagator) {
 	auto t0 = chrono::steady_clock::now();
 
-	CaDiCaL::Solver cuber;
-	cuber.set("inprocessing", 0);
-	cuber.set("factor",       0);
-	cuber.set("quiet",        1);
-	buildFormula(cuber, tmpl);
-
-	auto result = cuber.generate_cubes(cube_depth, /*min_depth=*/0);
-
-	double elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
-	cout << "  Cubes generated: " << result.cubes.size() << "\n";
-	cout << "  Cubing time    : " << elapsed << "s\n";
-
-	return result.cubes;
-}
-	#endif // USE_MARCH_CU
-#endif // CUBE_CONQUER
-
-// ---------------------------------------------------------------
-// Solves a single cube: rebuilds the formula, adds cube lits as
-// hard unit clauses, then runs the exhaustive enumeration.
-// ---------------------------------------------------------------
-long long solveOneCube(const vector<vector<vector<int>>>& tmpl,
-					   const vector<int>&                 cube,
-					   int observed_syms_A, int observed_syms_B,
-					   bool can_forget, int cube_index,
-					   FastSolutionProcessor& proc) {
-	CaDiCaL::Solver solver;
-	solver.set("factor",       0);
-	solver.set("factorcheck",  0);
-	solver.set("inprocessing", 0);
-	solver.set("report",       0);
-
-	buildFormula(solver, tmpl);
-
-	// Fix the cube as hard unit clauses (not assumptions — you want
-	// the exhaustive propagator to see them as permanent facts)
+	propagator.set_assumptions(cube);
 	for (int lit : cube)
-		solver.clause({lit});
+		solver.assume(lit);
 
-	// Observed variables (same as before)
-	vector<int> observed;
-	observed.reserve((observed_syms_A + observed_syms_B) * order * order);
-	for (int s = 0; s < observed_syms_A; ++s)
-		for (int r = 0; r < order; ++r)
-			for (int c = 0; c < order; ++c)
-				observed.push_back(var(0, r, c, s));
-	for (int s = 0; s < observed_syms_B; ++s)
-		for (int r = 0; r < order; ++r)
-			for (int c = 0; c < order; ++c)
-				observed.push_back(var(1, r, c, s));
+	double create_elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
+	total_cube_creation_time += create_elapsed;
 
-	ExhaustiveSearchOptions opts;
-	opts.to_observe = observed;
-	opts.only_neg   = true;
-	opts.can_forget = can_forget;
-
-	ExhaustiveSearch<FastSolutionProcessor> propagator(&solver, opts, proc);
-
-	auto t0 = chrono::steady_clock::now();
+	t0 = chrono::steady_clock::now();
 	int result = solver.solve();
-	double elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
+	solver.simplify();
+
+	double solve_elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
+	total_cube_solve_time += solve_elapsed;
 
 	long long count = propagator.get_solution_count();
-	cout << "  Cube " << cube_index << ": "
-		 //<< (result == 10 ? "SAT | " : "UNSAT | ")
-		 << count << " partial solutions, took " << elapsed << "s\n";
+	cout << "Cube " << cube_index << "(" << cube.size() << "): " << count << " partial solutions, took " << solve_elapsed << "/" << total_cube_solve_time << "s (" << create_elapsed << "/" << total_cube_creation_time <<"s)" << endl;
+	cout << "	Early clauses: " << propagator.get_early_blocking_count() << "/" << propagator.get_attempt_early_blocking_count() << "(" << get_refinement_count() << ")" << endl;
+
+	early_blocks += propagator.get_early_blocking_count();
+	early_blocks_total += propagator.get_attempt_early_blocking_count();
 
 	return count;
 }
+#else
+long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int>& cube,
+						const int& cube_index, ExhaustiveSearch<FastPolicy>& propagator) {
+	auto t0 = chrono::steady_clock::now();
 
-#if CUBE_CONQUER == 0
-long long runEncoding(const string& template_path, int template_id, 
-					  int observed_syms_A, int observed_syms_B, 
-					  bool can_forget) {
-	auto timer = chrono::steady_clock::now();
-	CaDiCaL::Solver solver;
-	solver.set("factor",       0);
-	solver.set("factorcheck",  0);
-	solver.set("inprocessing", 0);
-	//solver.set("report", 1);
-	//solver.set("quiet",        0);
-	//solver.set("verbose",      1);
+	CaDiCaL::Solver copy;
+	solver.copy(copy);
+	for (int lit : cube)
+		copy.clause(lit);
 
-	// ---- Load template ----
-	cout << "Loading template from: " << template_path << "\n";
-	auto tmpl = unloadTemplate(template_path);
-	if (tmpl[0].empty() || tmpl[1].empty()) {
-		cerr << "Failed to load a valid template.\n";
-		return -1;
-	}
+	ExhaustiveSearch<FastPolicy> propagator_(&copy, opts, FastPolicy());
 
-	int next_aux = buildFormula(solver, tmpl);
+	double create_elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
+	total_cube_creation_time += create_elapsed;
 
-	// ---- Collect observed variables ----
-	vector<int> observed;
-	observed.reserve((observed_syms_A + observed_syms_B) * order * order);
+	t0 = chrono::steady_clock::now();
+	int result = copy.solve();
 
-	for (int s = 0; s < observed_syms_A; ++s)
-		for (int r = 0; r < order; ++r)
-			for (int c = 0; c < order; ++c)
-				observed.push_back(var(0, r, c, s));
+	double solve_elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
+	total_cube_solve_time += solve_elapsed;
 
-	for (int s = 0; s < observed_syms_B; ++s)
-		for (int r = 0; r < order; ++r)
-			for (int c = 0; c < order; ++c)
-				observed.push_back(var(1, r, c, s));
+	long long count = propagator_.get_solution_count();
+	cout << "Cube " << cube_index << "(" << cube.size() << "): " << count << " partial solutions, took " << solve_elapsed << "/" << total_cube_solve_time << "s (" << create_elapsed << "/" << total_cube_creation_time <<"s)" << endl;
+	cout << "	Early clauses: " << propagator_.get_early_blocking_count() << "/" << propagator_.get_attempt_early_blocking_count() << "(" << get_refinement_count() << ", " << get_skipped_count() << ")" << endl;
 
-	cout << "Observed variables : " << observed.size() << "\n";
-	cout << "Total variables    : " << (next_aux - 1) << "\n";
+	early_blocks += propagator_.get_early_blocking_count();
+	early_blocks_total += propagator_.get_attempt_early_blocking_count();
 
-	// ---- Run exhaustive SAT solver ----
-	cout << "Running exhaustive SAT solver (can_forget=" << can_forget << ")...\n";
-
-	ExhaustiveSearchOptions opts;
-	opts.to_observe = observed;
-	opts.only_neg = true;
-	opts.can_forget = can_forget;
-
-	ExhaustiveSearch<FastSolutionProcessor> propagator(&solver, opts);
-
-	creation_time = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
-	auto solve_start = chrono::steady_clock::now();
-	int  result      = solver.solve();
-	double solve_elapsed = chrono::duration<double>(chrono::steady_clock::now() - solve_start).count();
-	long long sol_count = propagator.get_solution_count();
-
-	cout << "SAT result   			: " << (result == 10 ? "SAT" : (result == 20 ? "UNSAT" : "UNKNOWN")) << "\n";
-	cout << "Solutions    			: " << sol_count << "\n";
-	cout << "SAT Creation Wall time	: " << creation_time << "s\n";
-	cout << "Solving Wall time 		: " << solve_elapsed << "s\n";
-
-	return sol_count;
+	return count;
 }
-#else
+#endif
+
+// ---------------------------------------------------------------
+// Runs the entire encoding process from creating the solver to generating to cubes, then finishing by solving them all.
+// ---------------------------------------------------------------
 long long runEncoding(const string& template_path, int template_id,
-					  int observed_syms_A, int observed_syms_B,
-					  bool can_forget, int cube_depth = 8) {
+					  int observed_syms_A, bool can_forget, int cube_depth = 8) {
 	auto timer = chrono::steady_clock::now();
-	cout << "Loading template from: " << template_path << "\n";
+	cout << "Running Encoding:\n";
+
+	cout << "	Loading template from: " << template_path << "\n";
 	auto tmpl = unloadTemplate(template_path);
 	if (tmpl[0].empty() || tmpl[1].empty()) {
 		cerr << "Failed to load a valid template.\n";
 		return -1;
 	}
 
-	cout << "Cubing backend     : "
-#if USE_MARCH_CU
-		 << "march_cu (path=" << g_march_cu_path << ", -r=" << CUBE_R_PARAM << ", -m=" << Q_MAX_VAR << " [Q vars only])\n";
-#else
-		 << "CaDiCaL generate_cubes (depth=" << cube_depth << ")\n";
-#endif
+	cout << "	Generating Cubes: march_cu (path=" << g_march_cu_path << ", -r=" << CUBE_R_PARAM << ", -m=" << Q_MAX_VAR << " [Q vars only]";
+	if (CUBE_LIMIT > 0)
+		cout << ", -l=" << CUBE_LIMIT;
+	cout << ")\n";
 
 	// --- Cubing phase ---
 	string parent_dir = "./";
@@ -561,49 +571,70 @@ long long runEncoding(const string& template_path, int template_id,
 		return 0;
 	}
 
-	// --- Shared state for all cubes ---
-	std::unordered_set<uint64_t> global_seen;
-#if CUBE_CONQUER == 0 || USE_MARCH_CU == 1
-	FastSolutionProcessor proc = FastSolutionProcessor();
-#else
-	long long total_solutions = 0;
-	FastSolutionProcessor proc(total_solutions, &global_seen);
-#endif
+	cout << "	Creating SAT Instance:\n";
+	solver.set("factor",       0);
+	solver.set("factorcheck",  0);
+	solver.set("inprocessing", 0);
+	solver.set("report",       0);
+	buildFormula(solver, tmpl);
 
-	creation_time = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
+	vector<int> observed;
+	observed.reserve(observed_syms_A * order * order);
+	for (int s = 0; s < observed_syms_A; ++s)
+		for (int r = 0; r < order; ++r)
+			for (int c = 0; c < order; ++c)
+				observed.push_back(var(0, r, c, s));
+				
+	opts.to_observe = observed;
+	opts.only_neg   = true;
+	opts.can_forget = can_forget;
+
+	FastPolicy proc = FastPolicy();
+	ExhaustiveSearch<FastPolicy> propagator(&solver, opts, proc);
+
+	init_creation_time = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 	
 	// --- Conquer phase (sequential for now; trivial to parallelise later) ---
 	long long total = 0;
+	int interval = max(1, min(2000, (int)cubes.size()/10));
 	auto wall_start = chrono::steady_clock::now();
 
-	for (int i = 0; i < (int)cubes.size(); ++i)
-		total += solveOneCube(tmpl, cubes[i], observed_syms_A, observed_syms_B, can_forget, i, proc);
+	int cube_amount = cubes.size();
+#if MAX_CUBES > 0
+	if(cubes.size() > MAX_CUBES)
+		cube_amount = MAX_CUBES;
+#endif
+
+	cout << "	Solving Cubes:" << endl;
+	for (int i = 0; i < cube_amount; ++i) {
+		total += solveOneCube(tmpl, cubes[i], i, propagator);
+		if(i % interval == 0)
+			cout << i+1 << "/" << cubes.size() << ": average solve: " << total_cube_solve_time/(i + 1) << "s, average create: " << total_cube_creation_time/(i + 1) << "s, ETA: " << cubes.size() * (total_cube_solve_time/(i + 1) + total_cube_creation_time/(i + 1)) << "s" << endl;
+	}
 
 	double total_elapsed = chrono::duration<double>(chrono::steady_clock::now() - wall_start).count();
 
-	cout << "\nConquer wall time                : " << total_elapsed << "s\n";
-	cout << "Solutions (total)                : " << total << "\n";
-#if CUBE_CONQUER == 1 && USE_MARCH_CU == 0
-	cout << "Solutions (total duplicate free) : " << total_solutions << "\n";
-#endif
+	cout << "\nTotal wall time: " << total_elapsed << "s\n";
+	cout << "Partial Solutions: " << total << "\n";
 
 	return total;
 }
-#endif
 
 // ---------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------
-
 int main(int argc, char* argv[]) {
-	if (argc < 4) {
-		cerr << "Usage: " << argv[0] << " <template_id> <observed_syms_A (0-10)> <observed_syms_B (0-10)>\n";
+	if (argc < 2) {
+		cerr << "Usage: " << argv[0] << " <template_id> (# of free vars to remove) (maximum # of cubes)\n";
 		return 1;
 	}
 
 	int template_id     = atoi(argv[1]) + 1; // match Python: template_id = int(sys.argv[2]) + 1
-	int observed_syms_A = atoi(argv[2]);
-	int observed_syms_B = atoi(argv[3]);
+	int observed_syms_A = 10;
+	if (argc > 2)
+		CUBE_R_PARAM = atoi(argv[2]);
+	if (argc > 3)
+		CUBE_LIMIT = atoi(argv[3]);
 	bool can_forget = true;
 
 	string parent_dir    = "../";
@@ -613,29 +644,59 @@ int main(int argc, char* argv[]) {
 	string march_cu_dir  = "../CnC-master/march_cu";
 	g_march_cu_path      = march_cu_dir + "/march_cu";
 
+#if COPY_MODE == 1
+	cout << "== Copy Model, each cube are turned into literals into their own solver copied from a base solver, no learned clauses transfer over. ==\n";
+#else
+	cout << "== Assumption Model, each cube are turned into assumptions into a single shared solver, learned clauses transfer over. ==\n";
+#endif
+
 	cout << "=== Finding all partial solutions for template " << (template_id - 1) << " ===\n";
 	cout << "observed_syms_A        : " << observed_syms_A        << "\n";
-	cout << "observed_syms_B        : " << observed_syms_B        << "\n";
 	cout << "can_forget             : " << can_forget << "\n";
 
-	if (observed_syms_A > 10 || observed_syms_B > 10) {
+	if (observed_syms_A > 10) {
 		cerr << "Too many symbols observed; at most 10 per square.\n";
 		return 1;
 	}
-	if (observed_syms_A <= 0 && observed_syms_B <= 0) {
+	if (observed_syms_A <= 0) {
 		cerr << "At least one symbol transversal must be observed in either square.\n";
 		return 1;
 	}
 
 	setup(template_id);
 
-	long long sol_count = runEncoding(template_path, template_id, observed_syms_A, observed_syms_B, can_forget, 10);
+	long long sol_count = runEncoding(template_path, template_id, observed_syms_A, can_forget, 10);
 
 	cout << "\n=== FINAL RESULTS FOR TEMPLATE " << (template_id - 1) << " ===\n";
 	cout << "Total partial solutions found: " << sol_count << "\n";
 	cout << "Total refinements found: " << get_refinement_count() << "\n";
+	cout << "Total early blocking attempts: " << early_blocks << "/" << early_blocks_total << "\n";
+	cout << "Total cubes: " << cube_count << "\n";
 
-	print_substep_timings_log(creation_time);
+	print_substep_timings_log(init_creation_time, 
+		total_minimize_convert, total_minimize_cleanup, total_minimize_remove,
+		total_cube_gen_time, total_cube_creation_time, total_cube_solve_time);
 
 	return 0;
 }
+
+/*
+
+TODO: figure out a way to print CPU times, all of these are WALL times (CaDiCaL::Terminator or expose solver->internal somehow? i think its private so id need to expose it again)
+
+TODO: make get_refinements check the transversals in A and B:
+	If (A == 0 and B == 0) then stop early and return 0
+	If (A == 0 and B == order) or (B == order and A == 0) then only create half the constraints (can do this by setting the one with transverals as A and the other as B)
+	else create the full constraints
+
+TODO: *summary python script, takes in log Id and number of logs, the gets median, average and mode of the logs
+	A log is simply a txt file of the results
+
+TODO: run compute canada
+	A) need to be able to get all templates individually on compute canada
+	B) need to be able to refine templates into candidate lines individually on compute canada
+
+TODO: optional but could restore main functionality in libexact_partial_solution_refinement.cpp so it can still independentally be used as a "SAT2" step like before
+	This is not needed, only really applies if we want to independentally verify the correctness of the file and its implementation
+
+*/

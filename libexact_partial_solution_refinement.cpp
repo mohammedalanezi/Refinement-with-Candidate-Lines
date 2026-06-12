@@ -61,8 +61,11 @@ double precompute_time = 0.0;
 
 double total_line_parse_time = 0.0;
 double total_line_finding_time = 0.0;
-double total_line_parallel_time = 0.0;
 double total_line_intersection_time = 0.0;
+
+double total_early_parse_time = 0.0;
+double total_early_finding_time = 0.0;
+double total_early_intersection_time = 0.0;
 #endif
 
 struct U128Hash {
@@ -299,11 +302,12 @@ void precomputeDataStructures() {
  * @param b_lines         Output array to write Masks for square B lines into.
  * @param b_solutions     Running count of lines written to b_lines (modified in place).
  */
-void solutionToCandidateLines(const vector<int>& solution, __uint128_t a_lines[], int& a_solutions, __uint128_t b_lines[], int& b_solutions) {
+void solutionToCandidateLines(const vector<int>& solution, __uint128_t a_lines[], int& a_solutions) {
 	int points_by_symbol[2][order][order] = {0};
 	int counts[2][order] = {0};
 
 	for(int var : solution) {
+		if (var < 1 || var > 2 * order * order * order) continue;
 		const VarInfo& v = var_lookup[var]; 
 		int point = v.r * order + v.c + 1;
 		int& cnt = counts[v.sq][v.s];
@@ -315,54 +319,7 @@ void solutionToCandidateLines(const vector<int>& solution, __uint128_t a_lines[]
 			if (counts[sq][s] == order) {
 				if (sq == 0) 
 					a_lines[a_solutions++] = make_mask(points_by_symbol[sq][s]);
-				else 
-					b_lines[b_solutions++] = make_mask(points_by_symbol[sq][s]);
 			}
-}
-
-/**
- * @brief Finds all candidate lines that share no points with a given set of lines.
- *
- * Parallel means having zero intersection with every line in the input set, i.e. the candidate occupies a completely disjoint set of points. The solution lines themselves are always included in the output regardless.
- *
- * Special cases:
- * 
- *   - If line_count == 0, returns the full candidate list (no constraint).
- * 
- *   - If line_count == order, the solution is complete; only the solution lines themselves are returned (nothing can be parallel to a full covering).
- *
- * @param parallel_indices  Output array to write the result indices into. Must be pre-allocated to at least count_A or count_B.
- * @param parallel_count    Running count of indices written (modified in place).
- * @param line_indices      Indices of the solution lines (prepended to output unconditionally).
- * @param line_count        Number of solution lines provided.
- * @param total_incidence   Pre-computed union mask of all solution line masks. Avoids redundant mask[index] lookups
- *                          since the caller already holds the raw masks before the hash lookup.
- * @param is_A              If true, operates on square A candidates; otherwise square B.
- */
-void getAllParallelLineIndices(int*& parallel_indices, int& parallel_count, const int line_indices[], const int& line_count, const bool& is_A) {
-	int*        all      = is_A ? all_line_indices_A  : all_line_indices_B;
-	const int   all_size = is_A ? count_A             : count_B;
-	const auto& masks    = is_A ? cand_masks_A        : cand_masks_B;
-
-	if (line_count == 0) {
-		parallel_indices = all;
-		parallel_count   = all_size;
-		return;
-	}
-
-	for(int i = 0; i < line_count; i++)
-		parallel_indices[parallel_count++] = line_indices[i];
-
-	if (line_count == order)
-		return;
-
-	__uint128_t total_incidence = masks[line_indices[0]];
-	for(int i=1; i < line_count; i++)
-		total_incidence |= masks[line_indices[i]]; 
-
-	for (size_t i = 0; i < masks.size(); i++)
-		if(!linesIntersect(masks[i], total_incidence))
-			parallel_indices[parallel_count++] = i;
 }
 
 /**
@@ -376,28 +333,29 @@ void getAllParallelLineIndices(int*& parallel_indices, int& parallel_count, cons
  *
  * @param intersecting_indices Output array for indices that pass the filter. Must be pre-allocated to at least line_count.
  * @param intersection_count   Running count of indices written (modified in place).
- * @param line_indices         Candidate line indices to test (e.g. from getAllParallelLineIndices).
+ * @param line_indices         Candidate line indices to test.
  * @param line_count           Number of candidate lines to test.
  * @param opposite_indices     Indices of the opposite square's solution lines.
  * @param opposite_count       Number of opposite solution lines.
  * @param is_A                 If true, line_indices are A lines tested against B opposites; otherwise B lines tested against A opposites.
  * @param union_mask		   OR of all surviving candidate masks (used to skip the coverage recompute).
  */
-void getIntersectingLineIndices(int intersecting_indices[], int& intersection_count, 
-								const int line_indices[], const int& line_count, 
-								const int opposite_indices[], const int& opposite_count, 
-								const bool& is_A, __uint128_t& union_mask) {
-	const int    words       	 = is_A ? rows_A 			 : rows_B;
-	const uint64_t* bitset_table = is_A ? intersects_once_AB : intersects_once_BA;
-	const auto&     masks        = is_A ? cand_masks_A       : cand_masks_B;
+void getIntersectingBLineIndices(int intersecting_indices[], int& intersection_count,
+								const int opposite_indices[], __uint128_t& union_mask) { 
+	const int    words       	 = rows_B;
+	const uint64_t* bitset_table = intersects_once_BA;
+	const auto&     masks        = cand_masks_B;
 
 	uint64_t* result = (uint64_t*)alloca(words * sizeof(uint64_t));
+	bool resultSet = false;
 
-	if (opposite_count == 0)
-		memset(result, 0xFF, words * sizeof(uint64_t));
-	else {
-		memcpy(result, bitset_table + (long long)opposite_indices[0] * words, words * sizeof(uint64_t));
-		for (int j = 1; j < opposite_count; j++) {
+	for (int j = 0; j < order; j++)
+		if (opposite_indices[j] >= 0) {
+			if(!resultSet) {
+				resultSet = true;
+				memcpy(result, bitset_table + (long long)opposite_indices[j] * words, words * sizeof(uint64_t));
+				continue;
+			}
 			const uint64_t* row = bitset_table + (long long)opposite_indices[j] * words;
 			uint64_t nonzero = 0;
 			for (int w = 0; w < words; ++w) {
@@ -409,14 +367,47 @@ void getIntersectingLineIndices(int intersecting_indices[], int& intersection_co
 				return;
 			}
 		}
-	}
 
-	for (int i = 0; i < line_count; i++) {
-		const int idx = line_indices[i];
+	for (int idx = 0; idx < count_B; idx++) { 
 		if ((result[idx / 64] >> (idx % 64)) & 1) {
 			intersecting_indices[intersection_count++] = idx;
 			union_mask |= masks[idx]; // accumulate coverage
 		}
+	}
+}
+
+void getIntersectingBCovering(const int opposite_indices[], __uint128_t& union_mask) {
+	const int    words       	 = rows_B;
+	const uint64_t* bitset_table = intersects_once_BA;
+	const auto&     masks        = cand_masks_B;
+
+	uint64_t* result = (uint64_t*)alloca(words * sizeof(uint64_t));
+	bool resultSet = false;
+
+	for (int j = 0; j < order; j++)
+		if (opposite_indices[j] >= 0) {
+			if(!resultSet) {
+				resultSet = true;
+				memcpy(result, bitset_table + (long long)opposite_indices[j] * words, words * sizeof(uint64_t));
+				continue;
+			}
+			const uint64_t* row = bitset_table + (long long)opposite_indices[j] * words;
+			uint64_t nonzero = 0;
+			for (int w = 0; w < words; ++w) {
+				result[w] &= row[w];
+				nonzero |= result[w]; // track whether anything remains set
+			}
+			if (!nonzero) { // Early exit: result already all-zero; nothing will pass
+				return;
+			}
+		}
+
+	for (int idx = 0; idx < count_B; idx++) { 
+		if ((result[idx / 64] >> (idx % 64)) & 1) {
+			union_mask |= masks[idx]; // accumulate coverage
+		}
+		if (union_mask == all_points_mask)
+			return;
 	}
 }
 
@@ -440,27 +431,18 @@ void getIntersectingLineIndices(int intersecting_indices[], int& intersection_co
  * @param union_B   OR of all masks in B_indices (precomputed, 0 if trans_B == order).
  * @returns The total number of valid refinements found.
  */
-int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[], const int& A_count, const int B_indices[], const int& B_count, const __uint128_t union_A, const __uint128_t union_B) {
+int get_refinements(const int B_indices[], const int& B_count, const __uint128_t union_B) {
 #if TRACK_TIME == 1
 	auto timer = chrono::steady_clock::now();
 #endif
-	if (trans_A == order && trans_B == order) return 1; 
-
-	if (trans_A < order && union_A != all_points_mask) {
+	if (union_B != all_points_mask) {
 		#if TRACK_TIME == 1
 		total_libexact_creation_time += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 		#endif
 		return -1;
 	}
 
-	if (trans_B < order && union_B != all_points_mask) {
-		#if TRACK_TIME == 1
-		total_libexact_creation_time += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
-		#endif
-		return -1;
-	}
-
-	if (A_count == order && B_count == order) return 1;
+	if (B_count == order) return 1;
 
 	exact_t* e = exact_alloc();
 
@@ -498,7 +480,6 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
 	long int sol_count = 0;
 	while ((soln = exact_solve(e, &soln_size)) != NULL)
 		sol_count++;
-
 	exact_free(e);
 
 #if TRACK_TIME == 1
@@ -508,103 +489,12 @@ int get_refinements(const int& trans_A, const int& trans_B, const int A_indices[
 	return sol_count;
 }
 
-/**
- * @brief Processes a single partial solution line and counts its refinements.
- *
- * Parses the SAT literal string, extracts the symbol-lines determined by the partial solution, then runs a three-stage filtering pipeline to find
- * candidate lines for each square that could complete a valid refinement:
- * 
- *   1. solutionToCandidateLines: extract solution lines as Masks and look up their indices in the candidate hash maps.
- * 
- *   2. getAllParallelLineIndices: keep only candidates sharing no points with the same square's solution lines.
- * 
- *   3. getIntersectingLineIndices: keep only candidates intersecting each of the opposite square's solution lines exactly once.
- *
- * The surviving candidates are passed to get_refinements for libexact counting.
- *
- * @param line A vector from the SAT instance with only positive literals representing a partial solution. 
- * @returns The number of valid refinements found for this partial solution, or 0 if the line is empty or yields no valid candidates.
- */
-int processLine(const vector<int>& solution)
-{
-	++partial_count;
-	
-#if TRACK_TIME == 1
-	auto conversion_time = chrono::steady_clock::now();
-#endif 
-
-	__uint128_t A_sol_lines[order];
-	int trans_A = 0;
-	__uint128_t B_sol_lines[order];
-	int trans_B = 0;
-
-	solutionToCandidateLines(solution, A_sol_lines, trans_A, B_sol_lines, trans_B);
-
-#if TRACK_TIME == 1
-	double elapsed_1 = chrono::duration<double>(chrono::steady_clock::now() - conversion_time).count();
-	auto index_time = chrono::steady_clock::now();
-#endif
-
-	// Convert solution lines to their candidate line indices and compute incidence strings
-	int A_sol_indices[trans_A];
-	int B_sol_indices[trans_B];
-
-	for (int i = 0; i < trans_A; i++) {
-		auto it = cand_hash_A.find(A_sol_lines[i]);
-		if (it == cand_hash_A.end())
-			return 0; // transversal not in candidate set, so no refinements, in theory this should NEVER run but it does?
-		A_sol_indices[i] = it->second;
-	}
-	for (int i = 0; i < trans_B; i++) {
-		auto it = cand_hash_B.find(B_sol_lines[i]);
-		if (it == cand_hash_B.end())
-			return 0;
-		B_sol_indices[i] = it->second;
-	}
-
-#if TRACK_TIME == 1
-	double elapsed_index = chrono::duration<double>(chrono::steady_clock::now() - index_time).count();
-	auto parallel_time = chrono::steady_clock::now();
-#endif
-
-	int* parallel_A_indices = (int*)alloca(count_A * sizeof(int));
-	int  parallel_A_count = 0;
-	int* parallel_B_indices = (int*)alloca(count_B * sizeof(int));
-	int  parallel_B_count = 0;
-
-	getAllParallelLineIndices(parallel_A_indices, parallel_A_count, A_sol_indices, trans_A, true);
-	getAllParallelLineIndices(parallel_B_indices, parallel_B_count, B_sol_indices, trans_B, false);
-
-#if TRACK_TIME == 1
-	double elapsed_2 = chrono::duration<double>(chrono::steady_clock::now() - parallel_time).count();
-	auto intersection_time = chrono::steady_clock::now();
-#endif
-
-	// Filter to those that intersect exactly once with every line of the opposite square's solution using precomputed intersections
-	int intersecting_A_indices[parallel_A_count];
-	int intersection_A_count = 0;
-	int intersecting_B_indices[parallel_B_count];
-	int intersection_B_count = 0;
-
-	__uint128_t union_A = 0, union_B = 0;
-	getIntersectingLineIndices(intersecting_A_indices, intersection_A_count, parallel_A_indices, parallel_A_count, B_sol_indices, trans_B, true, union_A);
-	getIntersectingLineIndices(intersecting_B_indices, intersection_B_count, parallel_B_indices, parallel_B_count, A_sol_indices, trans_A, false, union_B);
-
-#if TRACK_TIME == 1
-	double elapsed_3 = chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
-	total_line_parse_time += elapsed_1;
-	total_line_finding_time += elapsed_index;
-	total_line_parallel_time += elapsed_2;
-	total_line_intersection_time += elapsed_3;
-#endif
-
-	long int refinement_count = get_refinements(trans_A, trans_B, intersecting_A_indices, intersection_A_count, intersecting_B_indices, intersection_B_count, union_A, union_B);
-
-	return refinement_count;
-}
-
 long int get_refinement_count() {
 	return total_refinements;
+}
+
+long int get_skipped_count() {
+	return skipped_partial_solutions;
 }
 
 int setup(int template_id) {
@@ -630,39 +520,113 @@ int setup(int template_id) {
 	return 0;
 }
 
-void solve_partial_solution(const vector<int>& solution) {
-	long int refinement_count = processLine(solution);
-	if(refinement_count > 0)
-		total_refinements += refinement_count;
-	else if(refinement_count < 0)
-		skipped_partial_solutions += 1; 
+int processLine(const int sym_A_idx[order]) {
+    ++partial_count;
+
+    #if TRACK_TIME == 1
+    auto intersection_time = chrono::steady_clock::now();
+    #endif
+
+    int intersecting_B_indices[count_B];
+    int intersection_B_count = 0;
+    __uint128_t union_B = 0;
+    getIntersectingBLineIndices(intersecting_B_indices, intersection_B_count, sym_A_idx, union_B);
+
+    #if TRACK_TIME == 1
+    double elapsed_3 = chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
+    total_line_intersection_time += elapsed_3;
+    #endif
+
+    if (intersection_B_count < order)
+        return -1;
+
+    return get_refinements(intersecting_B_indices, intersection_B_count, union_B);
 }
 
-void print_substep_timings_log(double creation_time) {
+bool check_partial_solution_covering(const int sym_A_idx[order]) {
+    #if TRACK_TIME == 1
+    auto intersection_time = chrono::steady_clock::now();
+    #endif
+
+    __uint128_t union_B = 0;
+    getIntersectingBCovering(sym_A_idx, union_B);
+
+    #if TRACK_TIME == 1
+    double elapsed_3 = chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
+    total_early_intersection_time += elapsed_3;
+    #endif
+
+    return union_B == all_points_mask;
+}
+
+bool solve_partial_solution(const int sym_A_idx[order]) {
+    long int refinement_count = processLine(sym_A_idx);
+    if (refinement_count > 0) {
+        total_refinements += refinement_count;
+        return false;
+    } else if (refinement_count < 0)
+        skipped_partial_solutions += 1;
+    return true;
+}
+
+void print_substep_timings_log(double creation_time, 
+		double total_minimize_convert, double total_minimize_cleanup, double total_minimize_remove,
+		double total_cube_gen_time, double total_cube_creation_time, double total_cube_solve_time) {
 	double elapsed = chrono::duration<double>(chrono::steady_clock::now() - start_time).count();
 
 	cout << "\n======= SUBSTEP DEFINITION  =======\n";
 	cout << "When a partial solution is found in the SAT instance, we attempt to refine it into all its possible full solutions.\n";
+	cout << "While looking for partial solutions, if they are incomplete, then we check if they can extend to a full solution and block early if they cannot.\n";
 	cout << "Each partial solution goes through a filter to process its compatible candidate lines, after which, these lines are checked to see if a solution is possible; skipping impossible partial solutions.\n";
 	cout << "Afterwards, the filtered candidate lines are created into a libexact instance and solved for all their possible refinements.\n";
+	cout << "Early blocking clauses and blocking clauses of partial solutions with no refinement are minimized to keep their clauses short.\n";
 
 #if TRACK_TIME == 1
 	double input_total = file_load_time + precompute_time;
 	double libexact_total = total_libexact_creation_time + total_libexact_solve_time;
-	double line_total =  total_line_parse_time + total_line_finding_time + total_line_parallel_time + total_line_intersection_time;
+	double line_total =  total_line_parse_time + total_line_finding_time + total_line_intersection_time;
+	double substep_total = line_total + libexact_total + input_total;
+
+	double early_total =  total_early_parse_time + total_early_finding_time + total_early_intersection_time;
+	double minimize_total = total_minimize_convert + total_minimize_cleanup + total_minimize_remove;
+	double post_processing = early_total + minimize_total;
+	
+	double sat_internal = total_cube_solve_time - (early_total + minimize_total + substep_total);
+	double cubing_total = total_cube_gen_time + total_cube_creation_time + sat_internal;
+	
+    double accounted = creation_time + cubing_total + substep_total + post_processing;
+    double other = elapsed - accounted;
 
 	cout << "\n=== WALL TIMINGS ===\n";
-	cout << "   SAT -> Substep (INPUT -> FILTER -> LIBEXACT)\n";
+	cout << "   Cube (SAT -> Solving + Early -> Minimize) -> Substep (INPUT -> FILTER -> LIBEXACT)\n";
 	
+	cout << "Cube:\n";
+	cout << "   Generation: " << total_cube_gen_time << "s\n"; // march_cu
+	cout << "   Solver Creation: " << total_cube_creation_time << "s\n";
+	cout << "   Solving: " << total_cube_solve_time - substep_total << "s\n"; // cadical
+	cout << "   Total: " << cubing_total << "s (Not including overlapping time)\n";
+
 	cout << "SAT:\n";
 	cout << "   Partial solutions processed: " << partial_count << " (" << skipped_partial_solutions << " skipped)\n";
 	cout << "   Throughput: " << (partial_count / elapsed) << " partial solutions/sec\n";
 	cout << "   Processed Throughput: " << ((partial_count - skipped_partial_solutions) / elapsed) << " extendable partial solutions/sec\n";
 	cout << "   Creation time: " << creation_time << "s\n";
-	cout << "   Running time: " << elapsed - (line_total + libexact_total + input_total + creation_time) << "s\n";
-	cout << "   Total: " << elapsed - (line_total + libexact_total + input_total) << "s (Remaining Time)\n";
+	cout << "   Internal time: " << sat_internal << "s\n";
+	cout << "   Total: " << sat_internal + creation_time << "s (Remaining Time)\n";
+	
+	cout << "Early:\n";
+	cout << "   Conversion to Candidate Lines: " << total_early_parse_time << "s\n";
+	cout << "   Candidate Index Lookup: " << total_early_finding_time << "s\n";
+	cout << "   Keep Valid Intersecting Lines: " << total_early_intersection_time << "s\n";
+	cout << "   Total: " << early_total << "s\n";
+	
+	cout << "Minimize:\n";
+	cout << "   Parse Clauses to Lines: " << total_minimize_convert << "s\n";
+	cout << "   Remove Partial Lines: " << total_minimize_cleanup << "s\n";
+	cout << "   Remove Redundant Lines: " << total_minimize_remove << "s\n";
+	cout << "   Total: " << minimize_total << "s\n";
 
-	cout << "Input:\n";
+	cout << "\nInput:\n";
 	cout << "   Reading from Candidate Lines files took: " << file_load_time << "s\n";
 	cout << "   Precomputing the required datastructures took: " << precompute_time << "s\n";
 	cout << "   Total: " << input_total << "s\n";
@@ -670,7 +634,6 @@ void print_substep_timings_log(double creation_time) {
 	cout << "Filter:\n";
 	cout << "   Parse Partial Solutions: " << total_line_parse_time << "s\n";
 	cout << "   Conversion to Candidate Lines: " << total_line_finding_time << "s\n";
-	cout << "   Finding Parallel Lines: " << total_line_parallel_time << "s\n";
 	cout << "   Keep Valid Intersecting Lines: " << total_line_intersection_time << "s\n";
 	cout << "   Total: " << line_total << "s\n";
 
@@ -681,5 +644,6 @@ void print_substep_timings_log(double creation_time) {
 
 	cout << "Substep Total: " << line_total + libexact_total + input_total << "s\n";
 	cout << "Total: " << elapsed << "s\n";
+	cout << "Other/Extra: " << other << "s\n";
 #endif
 }
