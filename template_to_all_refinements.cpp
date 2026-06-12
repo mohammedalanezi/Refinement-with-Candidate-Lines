@@ -17,8 +17,8 @@
 #define FULL_DUMP 0 // if we dump irredundant clauses/unit clauses to march_cu
 #define MAX_CUBES 0 // maximum cubes we process, infinite when <=0 (11), this is for early termination
 
-#define CANEARLY 0
-#define MINIMIZE 0
+#define CANEARLY 1
+#define MINIMIZE 1
 
 using namespace std; 
 
@@ -38,8 +38,7 @@ double total_cube_creation_time = 0.0f;
 double total_cube_solve_time = 0.0f;
 double total_cube_gen_time = 0.0f;
 
-double total_minimize_convert = 0.0;
-double total_minimize_cleanup = 0.0;
+double total_minimize_setup = 0.0;
 double total_minimize_remove = 0.0;
 
 bool cube_solver_created = false;
@@ -69,7 +68,6 @@ int CUBE_LIMIT = 0; // Max number of cubes that will be solved
 // Variables are 1-based and laid out as [sq][r][c][s] in row-major order.
 // Total base variables: 3 * 10^3 = 3000.
 // ---------------------------------------------------------------
-
 inline int var(int sq, int r, int c, int s) {
 	return sq * order * order * order + r  * order * order + c  * order + s  + 1;
 }
@@ -85,7 +83,6 @@ inline int var(int sq, int r, int c, int s) {
 // A '1' in the template means the cell belongs to the "relational"
 // (symbol 0–3) partition; '0' means the "non-relational" (4–9) partition.
 // ---------------------------------------------------------------
-
 vector<vector<vector<int>>> unloadTemplate(const string& path) {
 	vector<vector<vector<int>>> tmpl(2);
 	ifstream f(path);
@@ -130,7 +127,6 @@ vector<vector<vector<int>>> unloadTemplate(const string& path) {
 //   AMO   row: -var(sq,x,z,y) ∨ -var(sq,x,w,y)  (z =/= w)
 //   AMO   col: -var(sq,z,x,y) ∨ -var(sq,w,x,y)  (z =/= w)
 // ---------------------------------------------------------------
-
 void encodeLatinSquare(CaDiCaL::Solver& solver, int sq) {
 	for (int x = 0; x < order; ++x) {
 		for (int y = 0; y < order; ++y) {
@@ -166,7 +162,6 @@ void encodeLatinSquare(CaDiCaL::Solver& solver, int sq) {
 //   (z ∧ q) -> p   <=>   -z ∨ -q ∨  p
 //   (p ∧ q) -> z   <=>   -p ∨ -q ∨  z
 // ---------------------------------------------------------------
-
 void encodeMyrvoldOrthogonality(CaDiCaL::Solver& solver) {
 	for (int i = 0; i < order; ++i) {
 		for (int ip = 0; ip < order; ++ip) {
@@ -190,20 +185,18 @@ void encodeMyrvoldOrthogonality(CaDiCaL::Solver& solver) {
 // ---------------------------------------------------------------
 struct FastPolicy { 
 	mutable __uint128_t sym_points[order] 	= { 0 };
-	mutable int sym_cnt[order] 				= { 0 }; // popcount of each mask
-	mutable int sym_A_idx[order] 			= { -1 }; // index in cand_hash_A, or -1 if not complete
-	mutable __uint128_t cached_union_B 		= 0;// cached OR of all surviving B masks
+	mutable int sym_cnt[order] 				= { 0 }; 	// popcount of each mask
+	mutable int sym_A_idx[order] 			= { -1 }; 	// index in cand_hash_A, or -1 if not complete
+	mutable __uint128_t cached_union_B 		= 0;		// cached OR of all surviving B masks
 	mutable bool union_B_valid 				= false;    // cache validity flag
 	mutable int line_count 					= 0;
 	
 	explicit operator bool() const { return true; }
 
 	void notify_assignment(int var, int lit) const {
-		if (var > order * order * order || lit < 0) // only sq=0, only pos lits and unassignments
-			return;
+		if (var > order * order * order || lit < 0) return; // only sq=0, only pos lits and unassignments
 
 		const VarInfo& vi = var_lookup[var];
-
 		int point = vi.r * order + vi.c + 1; // 1‑based
 		int s     = vi.s;
 		__uint128_t bit = (__uint128_t)1 << (point - 1); // bit 0...(order*order-1)
@@ -228,20 +221,20 @@ struct FastPolicy {
 			auto it = cand_hash_A.find(sym_points[s]);
 			sym_A_idx[s] = (it != cand_hash_A.end()) ? it->second : -1;
 			union_B_valid = false;  
-			line_count++;
+			++line_count;
 		} else if (!now_complete && was_complete) {
 			sym_A_idx[s] = -1;
 			union_B_valid = false;
-			line_count--;
+			--line_count;
 		}
 	}
 	static constexpr bool notifyAssignment = true;
+
 	bool operator()(const std::vector<int>& solution) const {
 		return solve_partial_solution(sym_A_idx);
 	}
 
 	void reset() const {
-		cout << "Reset\n";
 		memset(sym_points, 0, sizeof(sym_points));
 		memset(sym_cnt, 0, sizeof(sym_cnt));
 		memset(sym_A_idx, -1, sizeof(sym_A_idx));
@@ -263,7 +256,7 @@ struct FastPolicy {
 		return cached_union_B == all_points_mask;
 	}
 
-	bool should_early() const {
+	bool should_early() const { // TODO: maybe add auxiliary timings that seperate/denote what portion of the covering time was spent on early blocking
 		#if CANEARLY == 1
 		return line_count > 5;
 		#else
@@ -271,10 +264,12 @@ struct FastPolicy {
 		#endif
 	}
 
-	#if MINIMIZE == 1
-	void minimize(std::vector<int>& clause) const {
+	#if MINIMIZE == 1 // TODO: fix timings, covering checks that are a result of this function end up being attributed to early blocking
+	void minimize(std::vector<int>& clause) const { // TODO: use precomputed prefix suffix system to speed up implementation of minimization
+		auto t0 = chrono::steady_clock::now();
+
 		int local_sym_A_idx[order];
-		memcpy(local_sym_A_idx,  sym_A_idx,  sizeof(sym_A_idx));
+		memcpy(local_sym_A_idx, sym_A_idx, sizeof(sym_A_idx));
 
 		std::unordered_set<int> clause_set(clause.begin(), clause.end());
 
@@ -284,6 +279,9 @@ struct FastPolicy {
 			while (lo) { int k = __builtin_ctzll(lo); clause_set.erase(-(k * order + s + 1 )); lo &= lo - 1; }
 			while (hi) { int k = __builtin_ctzll(hi); int kk = k + 64; clause_set.erase(-(kk * order + s + 1 )); hi &= hi - 1; }
 		};
+
+		total_minimize_setup += chrono::duration<double>(chrono::steady_clock::now() - t0).count();
+		t0 = chrono::steady_clock::now();
 
 		for (int s = 0; s < order; ++s)
 			if (local_sym_A_idx[s] >= 0) {
@@ -298,6 +296,8 @@ struct FastPolicy {
 				}
 			}
 		clause.assign(clause_set.begin(), clause_set.end());
+		
+		total_minimize_remove += chrono::duration<double>(chrono::steady_clock::now() - t0).count();
 	}
 	static constexpr bool minimizeClause = true;
 	#else
@@ -388,9 +388,7 @@ int buildFormula(CaDiCaL::Solver& solver, const vector<vector<vector<int>>>& tmp
 // ---------------------------------------------------------------
 // Cube generation
 // ---------------------------------------------------------------
-
-// Parses an .icnf cubes file produced by march_cu. Each cube line starts with 'a', contains space-separated literals, ends with 0.
-static vector<vector<int>> parseCubesFile(const string& path) {
+static vector<vector<int>> parseCubesFile(const string& path) { // Parses an .icnf cubes file produced by march_cu. Each cube line starts with 'a', contains space-separated literals, ends with 0
 	vector<vector<int>> cubes;
 	ifstream f(path);
 	if (!f.is_open()) {
@@ -420,7 +418,7 @@ static vector<vector<int>> parseCubesFile(const string& path) {
 //
 // Temp files are written alongside the template in parent_dir and are
 // named by template_id so parallel array jobs don't collide.
-vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const string& parent_dir, int template_id, int /*cube_depth_unused*/) {
+vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const string& parent_dir, int template_id) {
 	auto t0 = chrono::steady_clock::now();
 
 	string cnf_path   = parent_dir + "tmp_t" + to_string(template_id) + ".cnf";
@@ -482,8 +480,7 @@ vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const
 // Solves a single cube: reuses central solver, adds cube as assumption literals, then runs the exhaustive enumeration.
 // ---------------------------------------------------------------
 #if COPY_MODE == 0
-long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int>& cube,
-						const int& cube_index, ExhaustiveSearch<FastPolicy>& propagator) {
+long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int>& cube, const int& cube_index, ExhaustiveSearch<FastPolicy>& propagator) {
 	auto t0 = chrono::steady_clock::now();
 
 	propagator.set_assumptions(cube);
@@ -510,8 +507,7 @@ long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int
 	return count;
 }
 #else
-long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int>& cube,
-						const int& cube_index, ExhaustiveSearch<FastPolicy>& propagator) {
+long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int>& cube, const int& cube_index, ExhaustiveSearch<FastPolicy>& propagator) {
 	auto t0 = chrono::steady_clock::now();
 
 	CaDiCaL::Solver copy;
@@ -544,8 +540,7 @@ long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int
 // ---------------------------------------------------------------
 // Runs the entire encoding process from creating the solver to generating to cubes, then finishing by solving them all.
 // ---------------------------------------------------------------
-long long runEncoding(const string& template_path, int template_id,
-					  int observed_syms_A, bool can_forget, int cube_depth = 8) {
+long long runEncoding(const string& template_path, int template_id, int observed_syms_A, bool can_forget) {
 	auto timer = chrono::steady_clock::now();
 	cout << "Running Encoding:\n";
 
@@ -563,8 +558,7 @@ long long runEncoding(const string& template_path, int template_id,
 
 	// --- Cubing phase ---
 	string parent_dir = "./";
-
-	vector<vector<int>> cubes = generateCubes(tmpl, parent_dir, template_id, cube_depth);
+	vector<vector<int>> cubes = generateCubes(tmpl, parent_dir, template_id);
 	if (cubes.empty()) {
 		cout << "No cubes generated (formula UNSAT during cubing or march_cu error).\n";
 		return 0;
@@ -664,7 +658,7 @@ int main(int argc, char* argv[]) {
 
 	setup(template_id);
 
-	long long sol_count = runEncoding(template_path, template_id, observed_syms_A, can_forget, 10);
+	long long sol_count = runEncoding(template_path, template_id, observed_syms_A, can_forget);
 
 	cout << "\n=== FINAL RESULTS FOR TEMPLATE " << (template_id - 1) << " ===\n";
 	cout << "Total partial solutions found: " << sol_count << "\n";
@@ -673,20 +667,14 @@ int main(int argc, char* argv[]) {
 	cout << "Total cubes: " << cube_count << "\n";
 
 	print_substep_timings_log(init_creation_time, 
-		total_minimize_convert, total_minimize_cleanup, total_minimize_remove,
+		total_minimize_setup, total_minimize_remove,
 		total_cube_gen_time, total_cube_creation_time, total_cube_solve_time);
 
 	return 0;
 }
 
 /*
-
 TODO: figure out a way to print CPU times, all of these are WALL times (CaDiCaL::Terminator or expose solver->internal somehow? i think its private so id need to expose it again)
-
-TODO: make get_refinements check the transversals in A and B:
-	If (A == 0 and B == 0) then stop early and return 0
-	If (A == 0 and B == order) or (B == order and A == 0) then only create half the constraints (can do this by setting the one with transverals as A and the other as B)
-	else create the full constraints
 
 TODO: *summary python script, takes in log Id and number of logs, the gets median, average and mode of the logs
 	A log is simply a txt file of the results
@@ -694,8 +682,4 @@ TODO: *summary python script, takes in log Id and number of logs, the gets media
 TODO: run compute canada
 	A) need to be able to get all templates individually on compute canada
 	B) need to be able to refine templates into candidate lines individually on compute canada
-
-TODO: optional but could restore main functionality in libexact_partial_solution_refinement.cpp so it can still independentally be used as a "SAT2" step like before
-	This is not needed, only really applies if we want to independentally verify the correctness of the file and its implementation
-
 */

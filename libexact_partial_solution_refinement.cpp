@@ -30,16 +30,11 @@ const int order = 10;
 
 const vector<int> observed;
 
-unordered_set<int> points_A;
-unordered_set<int> points_B;
-unordered_set<int> total_points;
-
 uint64_t* intersects_once_AB = nullptr; // bitset table intersects_once_AB[j * rows_A + w]: bit i set iff intersections_AB[i*count_B+j] == 1
 uint64_t* intersects_once_BA = nullptr;
 int rows_A = 0; // ceil(count_A / 64)
 int rows_B = 0;
 int* all_line_indices_A = nullptr;
-int* all_line_indices_B = nullptr;
 
 long skipped_partial_solutions = 0;
 long partial_count = 0;
@@ -61,13 +56,9 @@ double total_libexact_solve_time = 0.0;
 double file_load_time = 0.0;
 double precompute_time = 0.0;
 
-double total_line_parse_time = 0.0;
-double total_line_finding_time = 0.0;
 double total_line_intersection_time = 0.0;
 
-double total_early_parse_time = 0.0;
-double total_early_finding_time = 0.0;
-double total_early_intersection_time = 0.0;
+double total_line_covering_time = 0.0;
 #endif
 
 struct U128Hash {
@@ -87,7 +78,6 @@ struct U128Hash {
 };
 
 unordered_map<__uint128_t, int, U128Hash> cand_hash_A;
-unordered_map<__uint128_t, int, U128Hash> cand_hash_B;
 
 struct VarInfo { int8_t sq, r, c, s; }; // 4 bytes per entry
 VarInfo var_lookup[2 * order * order * order + 1]; // index by var (1-based)
@@ -107,11 +97,6 @@ void mask_print(__uint128_t m) {
 		if (i % 8 == 0 && i > 0) cout << " ";
 	}
 	cout << endl;
-}
-
-bool mask_isSet(__uint128_t m, int p) {
-	if (p < 0 || p > 127) return false;
-	return (m >> p) & 1;
 }
 
 /**
@@ -151,17 +136,6 @@ bool intersectsExactlyOnce(__uint128_t m1, __uint128_t m2) {
 }
 
 /**
- * @brief Checks if two Masks intersect.
- * Uses bitwise operators on both halves of the masks to check if they intersect.
- * @param m1 The first __uint128_t.
- * @param m2 The second __uint128_t.
- * @returns If m1 and m2 intersect.
- */
-bool linesIntersect(__uint128_t m1, __uint128_t m2) {
-	return (m1 & m2) != 0;
-}
-
-/**
  * @brief Parses a space-separated list of integers from a prefixed text line.
  * Returns an empty vector if the line is empty or does not begin with the expected prefix character. The prefix and the character immediately after it (assumed to be a space) are stripped before parsing.
  * @param line   The raw text line to parse.
@@ -181,14 +155,13 @@ vector<int> parse_line(const string& line, char prefix) {
 
 /**
  * @brief Loads candidate lines from a text file and converts them to Masks.
- * Each line in the file beginning with 'R' or 'N' is parsed as a list of point indices and converted to a __uint128_t. All points encountered across all lines are collected into a set.
+ * Each line in the file beginning with 'R' or 'N' is parsed as a list of point indices and converted to a __uint128_t. 
  * @param path Path to the candidate lines file.
- * @returns A tuple of: the vector of Masks, the set of all points seen, and the total number of lines loaded.
+ * @returns A tuple of: the vector of Masks, and the total number of lines loaded.
  */
-tuple<vector<__uint128_t>, unordered_set<int>, int> load_candidate_lines_file(const string& path) {
+tuple<vector<__uint128_t>, int> load_candidate_lines_file(const string& path) {
 	ifstream f(path);
 	vector<__uint128_t> lines;
-	unordered_set<int> points;
 	string line;
 	while (getline(f, line)) {
 		if (line.empty()) continue;
@@ -197,12 +170,10 @@ tuple<vector<__uint128_t>, unordered_set<int>, int> load_candidate_lines_file(co
 			vector<int> nums = parse_line(line, prefix);
 			if (!nums.empty()) {
 				lines.push_back(make_mask(nums));
-				for (int p : nums) 
-					points.insert(p);
 			}
 		}
 	}
-	return {lines, points, (int)lines.size()};
+	return {lines, (int)lines.size()};
 }
 
 /**
@@ -244,8 +215,6 @@ tuple<int,int,int,int> indexTo4Tuple(int var_index, int num_squares, int num_row
  * 
  *  - `all_line_indices_A/B`: identity index arrays [0, 1, ..., count-1] used as the default candidate set when no filtering has been applied.
  * 
- *  - `cand_hash_A/B`: __uint128_t-to-index lookup maps for resolving solution lines to their global candidate indices.
- * 
  *  - `var_lookup`: int to 4 tuple look up map, used to avoid needing to divide multiple times per line.
  */
 void precomputeDataStructures() {
@@ -271,16 +240,11 @@ void precomputeDataStructures() {
 	all_line_indices_A = new int[count_A];
 	for(int i = 0; i < count_A; i++)
 		all_line_indices_A[i] = i;
-	all_line_indices_B = new int[count_B];
-	for(int i = 0; i < count_B; i++)
-		all_line_indices_B[i] = i;
+		
 
 	cand_hash_A.reserve(count_A * 2); // halves load factor so we have 2x fewer collision chains
 	for (int i = 0; i < count_A; ++i)
 		cand_hash_A[cand_masks_A[i]] = i;
-	cand_hash_B.reserve(count_B * 2);
-	for (int i = 0; i < count_B; ++i)
-		cand_hash_B[cand_masks_B[i]] = i;
 
 	for (int var = 1; var <= 2 * order * order * order; var++) {
 		auto [sq, r, c, s] = indexTo4Tuple(var, 2, order, order, order);
@@ -291,37 +255,6 @@ void precomputeDataStructures() {
 	double elapsed = chrono::duration<double>(end - start).count();
 	cout << "Precomputed intersections using masks in " << elapsed << " seconds." << endl;
 	//cout << "  A-B: " << cand_lines_A.size() << "x" << cand_lines_B.size() << " = " << (cand_lines_A.size() * cand_lines_B.size()) << " entries" << endl;
-}
-
-/**
- * @brief Extracts the symbol-lines from a partial SAT solution for both squares.
- * A symbol-line is the set of `order` grid points assigned to a single symbol within one square. 
- * For each symbol in each square, if all `order` assignments are present in the solution, the corresponding line is added as a __uint128_t, otherwise line is skipped.
- * @param solution        Array of positive SAT literals representing the solution.
- * @param solution_count  Number of literals in the solution array.
- * @param a_lines         Output array to write Masks for square A lines into.
- * @param a_solutions     Running count of lines written to a_lines (modified in place).
- * @param b_lines         Output array to write Masks for square B lines into.
- * @param b_solutions     Running count of lines written to b_lines (modified in place).
- */
-void solutionToCandidateLines(const vector<int>& solution, __uint128_t a_lines[], int& a_solutions) {
-	int points_by_symbol[2][order][order] = {0};
-	int counts[2][order] = {0};
-
-	for(int var : solution) {
-		if (var < 1 || var > 2 * order * order * order) continue;
-		const VarInfo& v = var_lookup[var]; 
-		int point = v.r * order + v.c + 1;
-		int& cnt = counts[v.sq][v.s];
-		points_by_symbol[v.sq][v.s][cnt++] = point;
-	}
-
-	for (int sq = 0; sq < 2; ++sq)
-		for (int s = 0; s < order; ++s)
-			if (counts[sq][s] == order) {
-				if (sq == 0) 
-					a_lines[a_solutions++] = make_mask(points_by_symbol[sq][s]);
-			}
 }
 
 /**
@@ -519,11 +452,8 @@ int setup(int template_id) {
 	string candidate_lines_2_path = parent_dir + "2-candidate_lines/" + to_string(template_id) + "-candidate_lines.txt";
 	string candidate_lines_3_path = parent_dir + "3-candidate_lines/" + to_string(template_id) + "-candidate_lines.txt";
 
-	tie(cand_masks_A, points_A, count_A) = load_candidate_lines_file(candidate_lines_2_path);
-	tie(cand_masks_B, points_B, count_B) = load_candidate_lines_file(candidate_lines_3_path);
-
-	total_points = points_A;
-	total_points.insert(points_B.begin(), points_B.end());
+	tie(cand_masks_A, count_A) = load_candidate_lines_file(candidate_lines_2_path);
+	tie(cand_masks_B, count_B) = load_candidate_lines_file(candidate_lines_3_path);
 	
 	intersecting_B_buf = new int[count_B];
 	
@@ -569,7 +499,7 @@ bool check_partial_solution_covering(const int sym_A_idx[order]) {
 
     #if TRACK_TIME == 1
     double elapsed_3 = chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
-    total_early_intersection_time += elapsed_3;
+    total_line_covering_time += elapsed_3;
     #endif
 
     return union_B == all_points_mask;
@@ -586,28 +516,27 @@ bool solve_partial_solution(const int sym_A_idx[order]) {
 }
 
 void print_substep_timings_log(double creation_time,
-		double total_minimize_convert, double total_minimize_cleanup, double total_minimize_remove,
+		double total_minimize_setup, double total_minimize_remove,
 		double total_cube_gen_time, double total_cube_creation_time, double total_cube_solve_time) {
 	double elapsed = chrono::duration<double>(chrono::steady_clock::now() - start_time).count();
 
 	cout << "\n======= SUBSTEP DEFINITION  =======\n";
 	cout << "When a partial solution is found in the SAT instance, we attempt to refine it into all its possible full solutions.\n";
-	cout << "While looking for partial solutions, if they are incomplete, then we check if they can extend to a full solution and block early if they cannot.\n";
+	cout << "While looking for partial solutions, if they are incomplete, we check if they can extend to a full solution and block early if they cannot.\n";
 	cout << "Each partial solution goes through a filter to process its compatible candidate lines, after which, these lines are checked to see if a solution is possible; skipping impossible partial solutions.\n";
-	cout << "Afterwards, the filtered candidate lines are created into a libexact instance and solved for all their possible refinements.\n";
-	cout << "Early blocking clauses and blocking clauses of partial solutions with no refinement are minimized to keep their clauses short.\n";
+	cout << "The filtered candidate lines are created into a libexact instance and solved for all their possible refinements.\n";
+	cout << "Early blocking clauses and blocking clauses of partial solutions with no refinements are minimized to keep their clauses short.\n";
 
 #if TRACK_TIME == 1
 	double input_total = file_load_time + precompute_time;
 	double libexact_total = total_libexact_creation_time + total_libexact_solve_time;
-	double line_total =  total_line_parse_time + total_line_finding_time + total_line_intersection_time;
+	double line_total =  total_line_intersection_time + total_line_covering_time;
 	double substep_total = line_total + libexact_total + input_total;
 
-	double early_total =  total_early_parse_time + total_early_finding_time + total_early_intersection_time;
-	double minimize_total = total_minimize_convert + total_minimize_cleanup + total_minimize_remove;
-	double post_processing = early_total + minimize_total;
+	double minimize_total = total_minimize_setup + total_minimize_remove;
+	double post_processing = minimize_total;
 	
-	double sat_internal = total_cube_solve_time - (early_total + minimize_total + substep_total);
+	double sat_internal = total_cube_solve_time - (minimize_total + substep_total);
 	double cubing_total = total_cube_gen_time + total_cube_creation_time + sat_internal;
 	
     double accounted = creation_time + cubing_total + substep_total + post_processing;
@@ -629,27 +558,19 @@ void print_substep_timings_log(double creation_time,
 	cout << "   Creation time: " << creation_time << "s\n";
 	cout << "   Internal time: " << sat_internal << "s\n";
 	cout << "   Total: " << sat_internal + creation_time << "s (Remaining Time)\n";
-	
-	cout << "Early:\n";
-	cout << "   Conversion to Candidate Lines: " << total_early_parse_time << "s\n";
-	cout << "   Candidate Index Lookup: " << total_early_finding_time << "s\n";
-	cout << "   Keep Valid Intersecting Lines: " << total_early_intersection_time << "s\n";
-	cout << "   Total: " << early_total << "s\n";
-	
+	#if MINIMIZE == 1
 	cout << "Minimize:\n";
-	cout << "   Parse Clauses to Lines: " << total_minimize_convert << "s\n";
-	cout << "   Remove Partial Lines: " << total_minimize_cleanup << "s\n";
+	cout << "   Setup Minimization: " << total_minimize_setup << "s\n";
 	cout << "   Remove Redundant Lines: " << total_minimize_remove << "s\n";
 	cout << "   Total: " << minimize_total << "s\n";
-
+	#endif
 	cout << "\nInput:\n";
 	cout << "   Reading from Candidate Lines files took: " << file_load_time << "s\n";
 	cout << "   Precomputing the required datastructures took: " << precompute_time << "s\n";
 	cout << "   Total: " << input_total << "s\n";
 
 	cout << "Filter:\n";
-	cout << "   Parse Partial Solutions: " << total_line_parse_time << "s\n";
-	cout << "   Conversion to Candidate Lines: " << total_line_finding_time << "s\n";
+	cout << "   Check Covering Valid Intersecting Lines: " << total_line_covering_time << "s\n";
 	cout << "   Keep Valid Intersecting Lines: " << total_line_intersection_time << "s\n";
 	cout << "   Total: " << line_total << "s\n";
 
