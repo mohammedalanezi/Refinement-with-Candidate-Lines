@@ -52,6 +52,8 @@ __uint128_t all_points_mask; // bit (p-1) set means point p is on this line (poi
 vector<__uint128_t> cand_masks_A; 
 vector<__uint128_t> cand_masks_B;
 
+static int* intersecting_B_buf = nullptr;
+
 #if TRACK_TIME == 1 // This tracking probably doesn't work the best when we are multithreading, TODO: fix that
 double total_libexact_creation_time = 0.0;
 double total_libexact_solve_time = 0.0;
@@ -367,11 +369,18 @@ void getIntersectingBLineIndices(int intersecting_indices[], int& intersection_c
 				return;
 			}
 		}
+	if (!resultSet) return;
 
-	for (int idx = 0; idx < count_B; idx++) { 
-		if ((result[idx / 64] >> (idx % 64)) & 1) {
+	for (int w = 0; w < rows_B; ++w) {
+		uint64_t word = result[w];
+		if (!word) continue;  // skip entire 64-bit zero word
+		while (word) {
+			int bit = __builtin_ctzll(word);
+			int idx = w * 64 + bit;
+			if (idx >= count_B) return;
 			intersecting_indices[intersection_count++] = idx;
-			union_mask |= masks[idx]; // accumulate coverage
+			union_mask |= masks[idx];
+			word &= word - 1;
 		}
 	}
 }
@@ -401,13 +410,19 @@ void getIntersectingBCovering(const int opposite_indices[], __uint128_t& union_m
 				return;
 			}
 		}
+	if (!resultSet) return;
 
-	for (int idx = 0; idx < count_B; idx++) { 
-		if ((result[idx / 64] >> (idx % 64)) & 1) {
-			union_mask |= masks[idx]; // accumulate coverage
+	for (int w = 0; w < rows_B; ++w) {
+		uint64_t word = result[w];
+		if (!word) continue;  // skip entire 64-bit zero word
+		while (word) {
+			int bit = __builtin_ctzll(word);
+			int idx = w * 64 + bit;
+			if (idx >= count_B) return;
+			union_mask |= masks[idx];
+			if (union_mask == all_points_mask) return;
+			word &= word - 1;
 		}
-		if (union_mask == all_points_mask)
-			return;
 	}
 }
 
@@ -510,6 +525,8 @@ int setup(int template_id) {
 	total_points = points_A;
 	total_points.insert(points_B.begin(), points_B.end());
 	
+	intersecting_B_buf = new int[count_B];
+	
 	file_load_time = chrono::duration<double>(chrono::steady_clock::now() - start_time).count();
 	
 	cout << "Precomputing all data structures..." << endl;
@@ -527,10 +544,9 @@ int processLine(const int sym_A_idx[order]) {
     auto intersection_time = chrono::steady_clock::now();
     #endif
 
-    int intersecting_B_indices[count_B];
     int intersection_B_count = 0;
     __uint128_t union_B = 0;
-    getIntersectingBLineIndices(intersecting_B_indices, intersection_B_count, sym_A_idx, union_B);
+    getIntersectingBLineIndices(intersecting_B_buf, intersection_B_count, sym_A_idx, union_B);
 
     #if TRACK_TIME == 1
     double elapsed_3 = chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
@@ -540,7 +556,7 @@ int processLine(const int sym_A_idx[order]) {
     if (intersection_B_count < order)
         return -1;
 
-    return get_refinements(intersecting_B_indices, intersection_B_count, union_B);
+    return get_refinements(intersecting_B_buf, intersection_B_count, union_B);
 }
 
 bool check_partial_solution_covering(const int sym_A_idx[order]) {

@@ -203,7 +203,6 @@ struct FastPolicy {
 			return;
 
 		const VarInfo& vi = var_lookup[var];
-		if (vi.sq != 0) return; // only square Q
 
 		int point = vi.r * order + vi.c + 1; // 1‑based
 		int s     = vi.s;
@@ -282,12 +281,12 @@ struct FastPolicy {
 		auto erase_sym_lits = [&](int s, __uint128_t mask) {
 			uint64_t lo = (uint64_t)mask;
 			uint64_t hi = (uint64_t)(mask >> 64);
-			while (lo) { int k = __builtin_ctzll(lo); clause_set.erase(-var(0, k / order, k % order, s)); lo &= lo - 1; }
-			while (hi) { int k = __builtin_ctzll(hi); int kk = k + 64; clause_set.erase(-var(0, kk / order, kk % order, s)); hi &= hi - 1; }
+			while (lo) { int k = __builtin_ctzll(lo); clause_set.erase(-(k * order + s + 1 )); lo &= lo - 1; }
+			while (hi) { int k = __builtin_ctzll(hi); int kk = k + 64; clause_set.erase(-(kk * order + s + 1 )); hi &= hi - 1; }
 		};
 
 		for (int s = 0; s < order; ++s)
-			if (local_sym_A_idx[s] > 0) {
+			if (local_sym_A_idx[s] >= 0) {
 				int saved_index = local_sym_A_idx[s];
 				local_sym_A_idx[s] = -1;
 
