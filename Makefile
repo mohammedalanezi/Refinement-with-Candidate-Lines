@@ -19,9 +19,27 @@ CXXFLAGS_BASE = -std=c++20 -pipe $(INCLUDES)
 # Link CaDiCaL
 LDFLAGS_BASE = ../cadical-exhaust-master/build/libcadical.a
 
+# USE flag controls profile-guided optimization (PGO):
+#   0 = no profiling flags (default, if not set)
+#   1 = generate profile data (-fprofile-generate)
+#   2 = use profile data (-fprofile-use)
+# The check is skipped for clean/distclean so they don't error out.
+USE ?= 0
+ifneq ($(filter-out clean distclean,$(MAKECMDGOALS)),)
+    ifeq ($(USE),0)
+        PROFILE_FLAGS =
+    else ifeq ($(USE),1)
+        PROFILE_FLAGS = -fprofile-generate
+    else ifeq ($(USE),2)
+        PROFILE_FLAGS = -fprofile-use
+    else
+        $(error USE= must be 0, 1, or 2)
+    endif
+endif
+
 # ===== Release build (for benchmarking) =====
-CXXFLAGS_RELEASE = -O3 -march=native -DNDEBUG
-LDFLAGS_RELEASE  = -flto
+CXXFLAGS_RELEASE = -O3 -march=native -DNDEBUG 
+LDFLAGS_RELEASE  = -flto $(PROFILE_FLAGS)
 
 # ===== ASan build (for testing) =====
 CXXFLAGS_ASAN = -O1 -g -fsanitize=address,undefined -fno-omit-frame-pointer \
@@ -52,5 +70,7 @@ asan: $(SRC_COMPLETE) $(EXACT_OBJS) libexact_partial_solution_refinement.cpp
 clean:
 	rm -f $(TARGET_COMPLETE) $(TARGET_COMPLETE_ASAN) $(TARGET_LIBEXACT)
 	rm -f $(EXACT_OBJS)
+	find . -name "*.gcda" -delete
+	find . -name "*.gcno" -delete
 
 .PHONY: all asan libexact complete clean

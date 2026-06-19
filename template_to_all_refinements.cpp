@@ -1,4 +1,3 @@
-
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -15,10 +14,13 @@
 #define MULTI_THREADING 0 // if I wanna add multi threading to substep then i need a worker and pool system
 #define COPY_MODE 1 // copy (1) faster than assumption mode (0) since we don't encounter clause poisoning, this is unknown for massively larger templates (e.g. 4) 
 #define FULL_DUMP 0 // if we dump irredundant clauses/unit clauses to march_cu
-#define MAX_CUBES 0 // maximum cubes we process, infinite when <=0 (11), this is for early termination
+#define MAX_CUBES 0 // maximum cubes we process, infinite when <=0, this is for early termination
+#define TRACK_TIME 1 // Track timings, GLOBAL WALL TIME ALWAYS TRACKED
 
-#define CANEARLY 1
-#define MINIMIZE 1
+#define CANEARLY 1 // 1 is fastest
+#define MINIMIZE 0 // 0 is fastest
+
+#define MIN_LINES 5 // 3-5 faster than 6 with no minimzation 
 
 using namespace std; 
 
@@ -54,6 +56,8 @@ string g_march_cu_path; // Path to the march_cu binary; set in main() from march
 // Increase this to get more cubes (each harder cube). We wait to solve each cube in a couple minutes at most but not too fast where creation/destruction of cadical slows it down.
 int CUBE_R_PARAM = 20; // (when we rebuild a solver for each cube) 20 seems to be the fastest time after naive testing of various values between 5 and 50
 int CUBE_LIMIT = 0; // Max number of cubes that will be solved
+
+int SAT_SEED = 0; // Seed of the Cubes, <= -1 adds no seed
 
 #include "libexact_partial_solution_refinement.cpp"
 
@@ -128,13 +132,14 @@ vector<vector<vector<int>>> unloadTemplate(const string& path) {
 //   AMO   col: -var(sq,z,x,y) ∨ -var(sq,w,x,y)  (z =/= w)
 // ---------------------------------------------------------------
 void encodeLatinSquare(CaDiCaL::Solver& solver, int sq) {
+    vector<int> clause1(order), clause2(order), clause3(order);
+
 	for (int x = 0; x < order; ++x) {
 		for (int y = 0; y < order; ++y) {
-			vector<int> clause1, clause2, clause3;
 			for (int z = 0; z < order; ++z) {
-				clause1.push_back(var(sq, x, y, z)); // cell (x,y) has symbol z
-				clause2.push_back(var(sq, x, z, y)); // row x, col z, symbol y
-				clause3.push_back(var(sq, z, x, y)); // row z, col x, symbol y
+                clause1[z] = var(sq, x, y, z); // cell (x,y) has symbol z
+                clause2[z] = var(sq, x, z, y); // row x, col z, symbol y
+                clause3[z] = var(sq, z, x, y); // row z, col x, symbol y
 
 				for (int w = z + 1; w < order; ++w) {
 					solver.clause({-var(sq, x, y, z), -var(sq, x, y, w)}); // AMO cell
@@ -201,7 +206,7 @@ struct FastPolicy {
 		int s     = vi.s;
 		__uint128_t bit = (__uint128_t)1 << (point - 1); // bit 0...(order*order-1)
 		
-    	bool was_complete = (sym_cnt[s] == order);
+		bool was_complete = (sym_cnt[s] == order);
 
 		if (lit > 0) { // assign: set bit if not already set
 			if (!(sym_points[s] & bit)) {
@@ -215,7 +220,7 @@ struct FastPolicy {
 			}
 		}
 
-    	bool now_complete = (sym_cnt[s] == order);
+		bool now_complete = (sym_cnt[s] == order);
 
 		if (now_complete && !was_complete) {
 			auto it = cand_hash_A.find(sym_points[s]);
@@ -238,8 +243,8 @@ struct FastPolicy {
 		memset(sym_points, 0, sizeof(sym_points));
 		memset(sym_cnt, 0, sizeof(sym_cnt));
 		memset(sym_A_idx, -1, sizeof(sym_A_idx));
-    	cached_union_B = 0;
-    	union_B_valid = false;
+		cached_union_B = 0;
+		union_B_valid = false;
 	}
 
 	FastPolicy() { reset(); }
@@ -250,54 +255,136 @@ struct FastPolicy {
 		
 		if (!union_B_valid) {
 			cached_union_B = 0;
-			getIntersectingBCovering(sym_A_idx, cached_union_B);
+			check_partial_solution_covering(sym_A_idx, cached_union_B);
 			union_B_valid = true;
 		}
 		return cached_union_B == all_points_mask;
 	}
 
-	bool should_early() const { // TODO: maybe add auxiliary timings that seperate/denote what portion of the covering time was spent on early blocking
+	bool should_early() const {
 		#if CANEARLY == 1
-		return line_count > 5;
+		return line_count >= MIN_LINES;
 		#else
 		return false;
 		#endif
 	}
 
-	#if MINIMIZE == 1 // TODO: fix timings, covering checks that are a result of this function end up being attributed to early blocking
-	void minimize(std::vector<int>& clause) const { // TODO: use precomputed prefix suffix system to speed up implementation of minimization
-		auto t0 = chrono::steady_clock::now();
+	#if MINIMIZE == 1 // TODO: fix: covering checks that are a result of this function end up being attributed to early blocking
+	void minimize(std::vector<int>& clause) const {
+	#if TRACK_TIME
+		auto t_start = chrono::steady_clock::now();
+	#endif
 
-		int local_sym_A_idx[order];
-		memcpy(local_sym_A_idx, sym_A_idx, sizeof(sym_A_idx));
+		constexpr int MAX_VAR = 1 + order * order * order;
+		static thread_local bool in_clause[MAX_VAR] = {};
 
-		std::unordered_set<int> clause_set(clause.begin(), clause.end());
+		for (int lit : clause) in_clause[-lit] = true;
 
-		auto erase_sym_lits = [&](int s, __uint128_t mask) {
-			uint64_t lo = (uint64_t)mask;
-			uint64_t hi = (uint64_t)(mask >> 64);
-			while (lo) { int k = __builtin_ctzll(lo); clause_set.erase(-(k * order + s + 1 )); lo &= lo - 1; }
-			while (hi) { int k = __builtin_ctzll(hi); int kk = k + 64; clause_set.erase(-(kk * order + s + 1 )); hi &= hi - 1; }
-		};
-
-		total_minimize_setup += chrono::duration<double>(chrono::steady_clock::now() - t0).count();
-		t0 = chrono::steady_clock::now();
-
+		// Collect active symbols (A-lines that are fully determined)
+		static int active_sym[order];
+		static const uint64_t* row_ptr[order];
+		int n_active = 0;
 		for (int s = 0; s < order; ++s)
-			if (local_sym_A_idx[s] >= 0) {
-				int saved_index = local_sym_A_idx[s];
-				local_sym_A_idx[s] = -1;
+			if (sym_A_idx[s] >= 0)
+				active_sym[n_active++] = s;
 
-				bool covers = check_partial_solution_covering(local_sym_A_idx);
-				if (covers) {
-					local_sym_A_idx[s] = saved_index;
-				} else { 
-					erase_sym_lits(s, sym_points[s]);
+		if (n_active == 0) {
+			int out = 0;
+			for (int lit : clause) {
+				if (in_clause[-lit]) {
+					clause[out++] = lit;
+					in_clause[-lit] = false;
 				}
 			}
-		clause.assign(clause_set.begin(), clause_set.end());
+			clause.resize(out);
+			return;
+		}
 		
-		total_minimize_remove += chrono::duration<double>(chrono::steady_clock::now() - t0).count();
+		// sort by row index so later loops access intersects_once_BA sequentially, improves cache locality & prefetching
+		std::sort(active_sym, active_sym + n_active, [this](int a, int b) { return sym_A_idx[a] < sym_A_idx[b]; }); 
+
+		// Stack-allocated prefix & suffix AND products
+		static const int words = rows_B; // number of 64‑bit words per A‑line
+        constexpr int MAX_ROWS_B = 256; // covers up to 16384 B-lines
+		static const int last_word_bits = count_B % 64;
+		static const uint64_t last_word_mask = last_word_bits ? (1ULL << last_word_bits) - 1 : ~0ULL; // this is needed to ensure that suffix and prefix don't AND to have bits in "out-of-bounds" areas
+    	alignas(64) static thread_local uint64_t suffix[(order + 1) * MAX_ROWS_B];
+		
+        // Build suffix products
+    	memset(suffix + n_active * words, 0xFF, words * sizeof(uint64_t));
+		suffix[n_active * words + words - 1] = last_word_mask;
+		const uint64_t* next_row = intersects_once_BA + (long long)sym_A_idx[active_sym[n_active - 1]] * words;
+		__builtin_prefetch(next_row, 0, 3);
+        for (int i = n_active - 1; i >= 0; --i) {
+            const uint64_t* __restrict row = next_row;
+			row_ptr[i] = row;
+			if (i - 1 >= 0) {
+				next_row = intersects_once_BA + (long long)sym_A_idx[active_sym[i-1]] * words;
+				__builtin_prefetch(next_row, 0, 3);
+			}
+            uint64_t*       __restrict dst = suffix + i * words;
+            const uint64_t* __restrict src = suffix + (i + 1) * words;
+            for (int w = 0; w < words; ++w)
+                dst[w] = src[w] & row[w];
+        }
+			
+		// Running prefix and redundancy check 
+		alignas(64) static thread_local uint64_t running_prefix[MAX_ROWS_B];
+		memset(running_prefix, 0xFF, words * sizeof(uint64_t));
+		running_prefix[words - 1] = last_word_mask;
+
+	#if TRACK_TIME
+		double setup_time = chrono::duration<double>(chrono::steady_clock::now() - t_start).count();
+		total_minimize_setup += setup_time;
+	#endif
+
+		constexpr int cutoff = 3;
+		int number_removed = 0;
+
+        // Check each symbol for redundancy (can the remaining symbols still cover?)
+		for (int i = 0; i < n_active; ++i) {
+			int s = active_sym[i];
+			const uint64_t* right = suffix + (i + 1) * words;
+
+			__uint128_t union_mask = 0;
+			bool covers = false;
+			bool done = false;
+
+			for (int w = 0; w < words && !done; ++w) {
+				uint64_t word = running_prefix[w] & right[w];
+				while (word) {
+					int bit = __builtin_ctzll(word);
+					int idx = w * 64 + bit;
+					//if (__builtin_expect(idx >= count_B, 0)) { done = true; break; }
+					union_mask |= cand_masks_B[idx];
+					if (union_mask == all_points_mask) { covers = true; done = true; break; }
+					word &= word - 1;
+				}
+			}
+
+			if (!covers) { // Remove negated literals of symbol s
+				uint64_t lo = (uint64_t)sym_points[s];
+				uint64_t hi = (uint64_t)(sym_points[s] >> 64);
+				while (lo) { int b = __builtin_ctzll(lo); in_clause[b * order + s + 1] = false; lo &= lo - 1; }
+				while (hi) { int b = __builtin_ctzll(hi); in_clause[(b + 64) * order + s + 1] = false; hi &= hi - 1; }
+				++number_removed;
+				if (number_removed >= cutoff) break;
+			} else {
+				const uint64_t* row = row_ptr[i];
+				for (int w = 0; w < words; ++w)
+					running_prefix[w] &= row[w];
+			}
+		}
+
+        // Rebuild clause from surviving marks
+        int out = 0;
+        for (int lit : clause) if (in_clause[-lit]) { clause[out++] = lit; in_clause[-lit] = false; }
+        clause.resize(out);
+
+	#if TRACK_TIME
+		double remove_time = chrono::duration<double>(chrono::steady_clock::now() - t_start).count() - setup_time;
+		total_minimize_remove += remove_time;
+	#endif
 	}
 	static constexpr bool minimizeClause = true;
 	#else
@@ -419,7 +506,9 @@ static vector<vector<int>> parseCubesFile(const string& path) { // Parses an .ic
 // Temp files are written alongside the template in parent_dir and are
 // named by template_id so parallel array jobs don't collide.
 vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const string& parent_dir, int template_id) {
+#if TRACK_TIME
 	auto t0 = chrono::steady_clock::now();
+#endif
 
 	string cnf_path   = parent_dir + "tmp_t" + to_string(template_id) + ".cnf";
 	string cubes_path = parent_dir + "tmp_t" + to_string(template_id) + "_cubes.icnf";
@@ -427,7 +516,7 @@ vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const
 	// Step 1: build a temporary solver just to dump the DIMACS file
 	cout << "  Writing CNF to: " << cnf_path << "\n";
 	{
-		CaDiCaL::Solver dumper;
+		CaDiCaL::Solver dumper; // TODO: could copy instead?
 		dumper.set("inprocessing", 0);
 		dumper.set("factor",       0);
 		buildFormula(dumper, tmpl);
@@ -460,14 +549,18 @@ vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const
 	cout << "  Running: " << cmd.str() << "\n";
 
 	int ret = system(cmd.str().c_str());
+#if TRACK_TIME
 	double elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
+#endif
 
 	if (ret != 0) {
 		cerr << "march_cu failed with exit code " << ret << "\n";
 		return {};
 	}
+#if TRACK_TIME
 	cout << "  Cubing time: " << elapsed << "s\n";
 	total_cube_gen_time = elapsed;
+#endif
 
 	// Step 3: parse the .icnf output
 	auto cubes = parseCubesFile(cubes_path);
@@ -481,21 +574,29 @@ vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const
 // ---------------------------------------------------------------
 #if COPY_MODE == 0
 long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int>& cube, const int& cube_index, ExhaustiveSearch<FastPolicy>& propagator) {
+#if TRACK_TIME
 	auto t0 = chrono::steady_clock::now();
+#endif
 
 	propagator.set_assumptions(cube);
 	for (int lit : cube)
 		solver.assume(lit);
 
+#if TRACK_TIME
 	double create_elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
 	total_cube_creation_time += create_elapsed;
 
 	t0 = chrono::steady_clock::now();
+#endif
 	int result = solver.solve();
 	solver.simplify();
 
+#if TRACK_TIME
 	double solve_elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
 	total_cube_solve_time += solve_elapsed;
+#else
+	static double solve_elapsed = -1.0;
+#endif
 
 	long long count = propagator.get_solution_count();
 	cout << "Cube " << cube_index << "(" << cube.size() << "): " << count << " partial solutions, took " << solve_elapsed << "/" << total_cube_solve_time << "s (" << create_elapsed << "/" << total_cube_creation_time <<"s)" << endl;
@@ -508,7 +609,9 @@ long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int
 }
 #else
 long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int>& cube, const int& cube_index, ExhaustiveSearch<FastPolicy>& propagator) {
+#if TRACK_TIME
 	auto t0 = chrono::steady_clock::now();
+#endif
 
 	CaDiCaL::Solver copy;
 	solver.copy(copy);
@@ -517,14 +620,23 @@ long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int
 
 	ExhaustiveSearch<FastPolicy> propagator_(&copy, opts, FastPolicy());
 
+#if TRACK_TIME
 	double create_elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
 	total_cube_creation_time += create_elapsed;
 
 	t0 = chrono::steady_clock::now();
+#else
+	static double create_elapsed = -1.0;
+#endif
+
 	int result = copy.solve();
 
+#if TRACK_TIME
 	double solve_elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
 	total_cube_solve_time += solve_elapsed;
+#else
+	static double solve_elapsed = -1.0;
+#endif
 
 	long long count = propagator_.get_solution_count();
 	cout << "Cube " << cube_index << "(" << cube.size() << "): " << count << " partial solutions, took " << solve_elapsed << "/" << total_cube_solve_time << "s (" << create_elapsed << "/" << total_cube_creation_time <<"s)" << endl;
@@ -569,6 +681,7 @@ long long runEncoding(const string& template_path, int template_id, int observed
 	solver.set("factorcheck",  0);
 	solver.set("inprocessing", 0);
 	solver.set("report",       0);
+	solver.set("seed", SAT_SEED);
 	buildFormula(solver, tmpl);
 
 	vector<int> observed;
@@ -583,7 +696,7 @@ long long runEncoding(const string& template_path, int template_id, int observed
 	opts.can_forget = can_forget;
 
 	FastPolicy proc = FastPolicy();
-	ExhaustiveSearch<FastPolicy> propagator(&solver, opts, proc);
+	ExhaustiveSearch<FastPolicy> propagator(&solver, opts, proc); // TODO: both not needed when COPY_MODE == 1?
 
 	init_creation_time = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 	
@@ -618,7 +731,7 @@ long long runEncoding(const string& template_path, int template_id, int observed
 // ---------------------------------------------------------------
 int main(int argc, char* argv[]) {
 	if (argc < 2) {
-		cerr << "Usage: " << argv[0] << " <template_id> (# of free vars to remove) (maximum # of cubes)\n";
+		cerr << "Usage: " << argv[0] << " <template_id> (# of free vars to remove) (seed) (maximum # of cubes)\n";
 		return 1;
 	}
 
@@ -627,7 +740,9 @@ int main(int argc, char* argv[]) {
 	if (argc > 2)
 		CUBE_R_PARAM = atoi(argv[2]);
 	if (argc > 3)
-		CUBE_LIMIT = atoi(argv[3]);
+		SAT_SEED = atoi(argv[3]);
+	if (argc > 4)
+		CUBE_LIMIT = atoi(argv[4]);
 	bool can_forget = true;
 
 	string parent_dir    = "../";
@@ -645,6 +760,11 @@ int main(int argc, char* argv[]) {
 
 	cout << "=== Finding all partial solutions for template " << (template_id - 1) << " ===\n";
 	cout << "observed_syms_A        : " << observed_syms_A        << "\n";
+	cout << "r_parameter            : " << CUBE_R_PARAM << "\n";
+	if(SAT_SEED >= 0)
+		cout << "sat_seed               : " << SAT_SEED << "\n";
+	if(CUBE_LIMIT > 0)
+		cout << "cube_limit             : " << CUBE_LIMIT << "\n";
 	cout << "can_forget             : " << can_forget << "\n";
 
 	if (observed_syms_A > 10) {

@@ -18,7 +18,11 @@ extern "C" {
 #include <unistd.h>
 #include <cstdlib>
 
+#define LIBEXACT 0 // determines if we use my custom search (faster) or libexact 
+
+#ifndef TRACK_TIME
 #define TRACK_TIME 1
+#endif
 
 using namespace std;
 
@@ -30,9 +34,7 @@ const int order = 10;
 
 const vector<int> observed;
 
-uint64_t* intersects_once_AB = nullptr; // bitset table intersects_once_AB[j * rows_A + w]: bit i set iff intersections_AB[i*count_B+j] == 1
 uint64_t* intersects_once_BA = nullptr;
-int rows_A = 0; // ceil(count_A / 64)
 int rows_B = 0;
 int* all_line_indices_A = nullptr;
 
@@ -109,18 +111,6 @@ __uint128_t make_mask(const vector<int>& line) {
 	for (int x : line)
 		m |= ((__uint128_t)1 << (x - 1)); // convert 1-100 to bit index 0-99
 	return m; 
-}
-
-/**
- * @brief Constructs a 128-bit __uint128_t from a fixed-length array of point indices (only 100 bits are used).
- * @param line A raw array of exactly `order` point values in the range [1, 100]. Each value is converted to a 0-based bit index and set in the __uint128_t.
- * @returns A __uint128_t with bits set at each position corresponding to a point in line.
- */
-__uint128_t make_mask(const int* line) {
-	__uint128_t m = 0;
-	for (int i = 0; i < order; i++)
-		m |= ((__uint128_t)1 << (line[i] - 1)); // convert 1-100 to bit index 0-99
-	return m;
 }
 
 /**
@@ -203,11 +193,7 @@ tuple<int,int,int,int> indexTo4Tuple(int var_index, int num_squares, int num_row
  *
  * Builds four bitset tables, all in flat row-major layout where each row is a bitset over the lines of one square packed into 64-bit words:
  *
- *  - `intersects_once_AB[j * rows_A + w]`: bit i set iff A line i intersects B line j exactly once,
- *
  *  - `intersects_once_BA[i * rows_B + w]`: bit j set iff B line j intersects A line i exactly once
- *    (both transposes of each other, allows us row-major access from either direction).
- *
  *
  * With ~14k lines per side, intersects_once_AB/BA are ~24MB each.Both fit in L3 cache, keeping the bit lookups fast across all tens of millions of calls.
  *
@@ -222,18 +208,15 @@ void precomputeDataStructures() {
 
 	all_points_mask = ((__uint128_t)1 << 100) - 1; // bits 0–99 set, one per grid point
 	
-	rows_A = (count_A + 63) / 64;
 	rows_B = (count_B + 63) / 64;
-	intersects_once_AB = new uint64_t[(long long)count_B * rows_A](); // intersects_once_AB[j * rows_A + w]: bit i set iff A line i intersects B line j exactly once.
-	intersects_once_BA = new uint64_t[(long long)count_A * rows_B]();
+	intersects_once_BA = new uint64_t[(long long)count_A * rows_B](); // intersects_once_BA[j * rows_B + w]: bit i set iff B line i intersects A line j exactly once.
 
 	for (int i = 0; i < count_A; ++i) 
 		for (int j = 0; j < count_B; ++j) { // for every (A line i, B line j) pair, compute how many points they share
 			if (intersectsExactlyOnce(cand_masks_A[i], cand_masks_B[j])) {
-				// store pair as bit in row j of intersects_once_AB. Each row is `rows_A` 64-bit words wide, so row j starts at offset j*rows_A
-				// line i defined in word i/64 of that row, at bit position i%64. Setting that bit says: A line i intersects B line j exactly once
-				intersects_once_AB[(long long)j * rows_A + i / 64] |= (1ULL << (i % 64));
-				intersects_once_BA[(long long)i * rows_B + j / 64] |= (1ULL << (j % 64)); // symmetric entry, row i, word j/64, bit j%64
+				// store pair as bit in row j of intersects_once_BA. Each row is `rows_B` 64-bit words wide, so row j starts at offset j*rows_B
+				// line i defined in word i/64 of that row, at bit position i%64. Setting that bit says: B line i intersects A line j exactly once
+				intersects_once_BA[(long long)i * rows_B + j / 64] |= (1ULL << (j % 64));
 			}
 		}
 
@@ -306,11 +289,9 @@ void getIntersectingBLineIndices(int intersecting_indices[], int& intersection_c
 
 	for (int w = 0; w < rows_B; ++w) {
 		uint64_t word = result[w];
-		if (!word) continue;  // skip entire 64-bit zero word
 		while (word) {
 			int bit = __builtin_ctzll(word);
 			int idx = w * 64 + bit;
-			if (idx >= count_B) return;
 			intersecting_indices[intersection_count++] = idx;
 			union_mask |= masks[idx];
 			word &= word - 1;
@@ -347,11 +328,9 @@ void getIntersectingBCovering(const int opposite_indices[], __uint128_t& union_m
 
 	for (int w = 0; w < rows_B; ++w) {
 		uint64_t word = result[w];
-		if (!word) continue;  // skip entire 64-bit zero word
 		while (word) {
 			int bit = __builtin_ctzll(word);
 			int idx = w * 64 + bit;
-			if (idx >= count_B) return;
 			union_mask |= masks[idx];
 			if (union_mask == all_points_mask) return;
 			word &= word - 1;
@@ -359,6 +338,7 @@ void getIntersectingBCovering(const int opposite_indices[], __uint128_t& union_m
 	}
 }
 
+#if LIBEXACT == 1
 /**
  * @brief Counts valid refinements using libexact exhaustive exact cover search.
  *
@@ -424,7 +404,7 @@ int get_refinements(const int B_indices[], const int& B_count, const __uint128_t
 
 	// 4. enumerate all solutions: each solution is a valid B square
 	int soln_size;
-	const int* soln;
+	const int* soln; // this should give us a int array of the columns picked in the solution
 	long int sol_count = 0;
 	while ((soln = exact_solve(e, &soln_size)) != NULL)
 		sol_count++;
@@ -436,14 +416,69 @@ int get_refinements(const int B_indices[], const int& B_count, const __uint128_t
 
 	return sol_count;
 }
+#else
+/**
+ * @brief Recursively counts the ways to select disjoint candidate lines that exactly cover all 100 grid points.
+ *
+ * Replaces our general-purpose exact-cover solve with a search specialized to this problem: every candidate line
+ * has exactly `order` bits set, so any selection of lines whose union equals `all_points_mask` is automatically a
+ * partition, overlap would shrink the union below the lines' combined weight, which is impossible once 
+ * the union reaches exactly 100 bits. This means no explicit "no overlap" check or "used line" bookkeeping
+ * is needed beyond `(m & covered) == 0`.
+ *
+ * At each step, branches only on candidate lines that cover the lowest-indexed uncovered point, which keeps
+ * the branching factor equal to however many candidates happen to cover that point. Recursion bottoms out
+ * when `covered` reaches `all_points_mask`, contributing one to the count for that path. A previously-chosen
+ * line can never be re-picked, since all of its bits are already folded into `covered` by the time it would
+ * be considered again.
+ *
+ * @param B_indices Candidate B line indices to search over (same array passed to get_refinements).
+ * @param B_count   Number of candidate lines in B_indices.
+ * @param covered   Bitmask of grid points already covered by lines chosen earlier in the recursion (pass 0 at the top-level call).
+ * @returns The number of distinct subsets of B_indices whose masks are pairwise disjoint and whose union equals all_points_mask.
+ */
+static int count_exact_covers(const int B_indices[], int B_count, __uint128_t covered) {
+    if (covered == all_points_mask) return 1;
 
-long int get_refinement_count() {
-	return total_refinements;
+    // pick the lowest still-uncovered point to branch on
+    __uint128_t uncovered = all_points_mask & ~covered; // bitwise not
+    uint64_t lo = (uint64_t)uncovered;
+    int bit = lo ? __builtin_ctzll(lo) : 64 + __builtin_ctzll((uint64_t)(uncovered >> 64)); // find lowest bit
+
+    int count = 0;
+    for (int i = 0; i < B_count; i++) {
+        __uint128_t m = cand_masks_B[B_indices[i]];
+        if (((m >> bit) & 1) && (m & covered) == 0) // if mask is 1 at lowest uncovered bit position and if mask doesn't intersect covered
+            count += count_exact_covers(B_indices, B_count, covered | m);
+    }
+    return count;
 }
 
-long int get_skipped_count() {
-	return skipped_partial_solutions;
+int get_refinements(const int B_indices[], const int& B_count, const __uint128_t union_B) {
+#if TRACK_TIME == 1
+    auto timer = chrono::steady_clock::now();
+#endif
+    if (union_B != all_points_mask) {
+        #if TRACK_TIME == 1
+        total_libexact_creation_time += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
+        #endif
+        return -1;
+    }
+
+    if (B_count == order) return 1;
+
+    int sol_count = count_exact_covers(B_indices, B_count, 0);
+
+#if TRACK_TIME == 1
+    total_libexact_solve_time += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
+#endif
+
+    return sol_count;
 }
+#endif
+
+long int get_refinement_count() { return total_refinements; }
+long int get_skipped_count()    { return skipped_partial_solutions; }
 
 int setup(int template_id) {
 	cout << "Loading candidate lines from files..." << endl;
@@ -457,13 +492,16 @@ int setup(int template_id) {
 	
 	intersecting_B_buf = new int[count_B];
 	
+#if TRACK_TIME == 1
 	file_load_time = chrono::duration<double>(chrono::steady_clock::now() - start_time).count();
+#endif
 	
 	cout << "Precomputing all data structures..." << endl;
 	precomputeDataStructures();
 	
+#if TRACK_TIME == 1
 	precompute_time = chrono::duration<double>(chrono::steady_clock::now() - start_time).count() - file_load_time;
-
+#endif
 	return 0;
 }
 
@@ -495,6 +533,21 @@ bool check_partial_solution_covering(const int sym_A_idx[order]) {
     #endif
 
     __uint128_t union_B = 0;
+    getIntersectingBCovering(sym_A_idx, union_B);
+
+    #if TRACK_TIME == 1
+    double elapsed_3 = chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
+    total_line_covering_time += elapsed_3;
+    #endif
+
+    return union_B == all_points_mask;
+}
+
+bool check_partial_solution_covering(const int sym_A_idx[order], __uint128_t& union_B) {
+    #if TRACK_TIME == 1
+    auto intersection_time = chrono::steady_clock::now();
+    #endif
+
     getIntersectingBCovering(sym_A_idx, union_B);
 
     #if TRACK_TIME == 1
@@ -574,11 +627,18 @@ void print_substep_timings_log(double creation_time,
 	cout << "   Keep Valid Intersecting Lines: " << total_line_intersection_time << "s\n";
 	cout << "   Total: " << line_total << "s\n";
 
+	#if LIBEXACT == 1
 	cout << "Libexact:\n";
 	cout << "   Libexact Creation: " << total_libexact_creation_time << "s\n";
 	cout << "   Libexact Solving: " << total_libexact_solve_time << "s\n";
 	cout << "   Total: " << libexact_total << "s\n";
-
+	#else
+	cout << "Refinement:\n";
+	cout << "   Creation: " << total_libexact_creation_time << "s (early covering check)\n";
+	cout << "   Solving: " << total_libexact_solve_time << "s\n";
+	cout << "   Total: " << libexact_total << "s\n";
+	#endif
+	
 	cout << "Substep Total: " << line_total + libexact_total + input_total << "s\n";
 	cout << "Total: " << elapsed << "s\n";
 	cout << "Other/Extra: " << other << "s\n";
