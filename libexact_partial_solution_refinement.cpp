@@ -163,6 +163,7 @@ tuple<vector<__uint128_t>, int> load_candidate_lines_file(const string& path) {
 			}
 		}
 	}
+	cout << "Loaded candidate line file: " << path << endl;
 	return {lines, (int)lines.size()};
 }
 
@@ -287,8 +288,13 @@ void getIntersectingBLineIndices(int intersecting_indices[], int& intersection_c
 		}
 	if (!resultSet) return;
 
+	const int last_word_bits = count_B % 64;
+	const uint64_t last_word_mask = last_word_bits ? (1ULL << last_word_bits) - 1 : ~0ULL;
+
 	for (int w = 0; w < rows_B; ++w) {
 		uint64_t word = result[w];
+		if (w == rows_B - 1)
+			word &= last_word_mask;   // discard invalid bits
 		while (word) {
 			int bit = __builtin_ctzll(word);
 			int idx = w * 64 + bit;
@@ -326,8 +332,13 @@ void getIntersectingBCovering(const int opposite_indices[], __uint128_t& union_m
 		}
 	if (!resultSet) return;
 
+	const int last_word_bits = count_B % 64;
+	const uint64_t last_word_mask = last_word_bits ? (1ULL << last_word_bits) - 1 : ~0ULL;
+
 	for (int w = 0; w < rows_B; ++w) {
 		uint64_t word = result[w];
+		if (w == rows_B - 1)
+			word &= last_word_mask;   // discard invalid bits
 		while (word) {
 			int bit = __builtin_ctzll(word);
 			int idx = w * 64 + bit;
@@ -437,20 +448,28 @@ int get_refinements(const int B_indices[], const int& B_count, const __uint128_t
  * @param covered   Bitmask of grid points already covered by lines chosen earlier in the recursion (pass 0 at the top-level call).
  * @returns The number of distinct subsets of B_indices whose masks are pairwise disjoint and whose union equals all_points_mask.
  */
-static int count_exact_covers(const int B_indices[], int B_count, __uint128_t covered) {
+static int count_exact_covers(const int B_indices[], int B_count,
+                              __uint128_t covered, int idx, int chosen,
+                              const __uint128_t suffix[]) {
     if (covered == all_points_mask) return 1;
+    if (idx >= B_count) return 0;
 
-    // pick the lowest still-uncovered point to branch on
-    __uint128_t uncovered = all_points_mask & ~covered; // bitwise not
-    uint64_t lo = (uint64_t)uncovered;
-    int bit = lo ? __builtin_ctzll(lo) : 64 + __builtin_ctzll((uint64_t)(uncovered >> 64)); // find lowest bit
+    // Prune 1: remaining lines cannot cover all points
+    if ((covered | suffix[idx]) != all_points_mask) return 0;
+
+    // Prune 2: not enough lines left to reach 10
+    if (chosen + (B_count - idx) < 10) return 0;
 
     int count = 0;
-    for (int i = 0; i < B_count; i++) {
-        __uint128_t m = cand_masks_B[B_indices[i]];
-        if (((m >> bit) & 1) && (m & covered) == 0) // if mask is 1 at lowest uncovered bit position and if mask doesn't intersect covered
-            count += count_exact_covers(B_indices, B_count, covered | m);
-    }
+
+    // Option 1: skip line idx
+    count += count_exact_covers(B_indices, B_count, covered, idx + 1, chosen, suffix);
+
+    // Option 2: include line idx if it doesn't overlap
+    __uint128_t m = cand_masks_B[B_indices[idx]];
+    if ((m & covered) == 0)
+        count += count_exact_covers(B_indices, B_count, covered | m, idx + 1, chosen + 1, suffix);
+
     return count;
 }
 
@@ -467,7 +486,12 @@ int get_refinements(const int B_indices[], const int& B_count, const __uint128_t
 
     if (B_count == order) return 1;
 
-    int sol_count = count_exact_covers(B_indices, B_count, 0);
+	__uint128_t suffix[B_count + 1];
+	suffix[B_count] = 0;
+	for (int i = B_count - 1; i >= 0; --i)
+		suffix[i] = suffix[i + 1] | cand_masks_B[B_indices[i]];
+
+	int sol_count = count_exact_covers(B_indices, B_count, 0, 0, 0, suffix);
 
 #if TRACK_TIME == 1
     total_libexact_solve_time += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
@@ -511,14 +535,13 @@ int processLine(const int sym_A_idx[order]) {
     #if TRACK_TIME == 1
     auto intersection_time = chrono::steady_clock::now();
     #endif
-
     int intersection_B_count = 0;
     __uint128_t union_B = 0;
-    getIntersectingBLineIndices(intersecting_B_buf, intersection_B_count, sym_A_idx, union_B);
-
+    getIntersectingBLineIndices(intersecting_B_buf, intersection_B_count,
+                                sym_A_idx, union_B);
     #if TRACK_TIME == 1
-    double elapsed_3 = chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
-    total_line_intersection_time += elapsed_3;
+    total_line_intersection_time +=
+        chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
     #endif
 
     if (intersection_B_count < order)

@@ -19,6 +19,7 @@
 
 #define CANEARLY 1 // 1 is fastest
 #define MINIMIZE 0 // 0 is fastest
+#define CANFORGET 1 // 1 is fastest
 
 #define MIN_LINES 5 // 3-5 faster than 6 with no minimzation 
 
@@ -224,19 +225,25 @@ struct FastPolicy {
 
 		if (now_complete && !was_complete) {
 			auto it = cand_hash_A.find(sym_points[s]);
-			sym_A_idx[s] = (it != cand_hash_A.end()) ? it->second : -1;
+			if(it != cand_hash_A.end()) {
+				++line_count;
+				sym_A_idx[s] = it->second;
+			} else 
+				sym_A_idx[s] = -1;
 			union_B_valid = false;  
-			++line_count;
 		} else if (!now_complete && was_complete) {
+			if(sym_A_idx[s] != -1)
+				--line_count;
 			sym_A_idx[s] = -1;
 			union_B_valid = false;
-			--line_count;
 		}
 	}
 	static constexpr bool notifyAssignment = true;
 
 	bool operator()(const std::vector<int>& solution) const {
-		return solve_partial_solution(sym_A_idx);
+		if(line_count == 10)
+			return solve_partial_solution(sym_A_idx);
+		return true;
 	}
 
 	void reset() const {
@@ -743,7 +750,6 @@ int main(int argc, char* argv[]) {
 		SAT_SEED = atoi(argv[3]);
 	if (argc > 4)
 		CUBE_LIMIT = atoi(argv[4]);
-	bool can_forget = true;
 
 	string parent_dir    = "../";
 	string template_path = parent_dir + "refinements and candidate lines/templates/" + to_string(template_id) + "-template.txt";
@@ -761,11 +767,15 @@ int main(int argc, char* argv[]) {
 	cout << "=== Finding all partial solutions for template " << (template_id - 1) << " ===\n";
 	cout << "observed_syms_A        : " << observed_syms_A        << "\n";
 	cout << "r_parameter            : " << CUBE_R_PARAM << "\n";
+	cout << "will early block       : " << CANEARLY << "\n";
+	if(CANEARLY > 0)
+		cout << "   minimum lines       : " << MIN_LINES << "\n";
+	cout << "will minimize          : " << MINIMIZE << "\n";
+	cout << "can forget             : " << CANFORGET << "\n";
 	if(SAT_SEED >= 0)
 		cout << "sat_seed               : " << SAT_SEED << "\n";
 	if(CUBE_LIMIT > 0)
 		cout << "cube_limit             : " << CUBE_LIMIT << "\n";
-	cout << "can_forget             : " << can_forget << "\n";
 
 	if (observed_syms_A > 10) {
 		cerr << "Too many symbols observed; at most 10 per square.\n";
@@ -778,7 +788,7 @@ int main(int argc, char* argv[]) {
 
 	setup(template_id);
 
-	long long sol_count = runEncoding(template_path, template_id, observed_syms_A, can_forget);
+	long long sol_count = runEncoding(template_path, template_id, observed_syms_A, CANFORGET);
 
 	cout << "\n=== FINAL RESULTS FOR TEMPLATE " << (template_id - 1) << " ===\n";
 	cout << "Total partial solutions found: " << sol_count << "\n";
