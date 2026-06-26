@@ -563,7 +563,7 @@ bool solve_partial_solution(const int sym_A_idx[order]) {
 void print_substep_timings_log(double creation_time,
 		double total_minimize_setup, double total_minimize_remove,
 		double total_cube_gen_time, double total_cube_creation_time, double total_cube_solve_time) {
-	double elapsed = chrono::duration<double>(chrono::steady_clock::now() - start_time).count();
+	double elapsed = chrono::duration<double>(chrono::steady_clock::now() - start_time).count(); 
 
 	cout << "\n======= SUBSTEP DEFINITION  =======\n";
 	cout << "When a partial solution is found in the SAT instance, we attempt to refine it into all its possible full solutions.\n";

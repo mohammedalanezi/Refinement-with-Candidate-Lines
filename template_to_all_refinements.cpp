@@ -763,7 +763,7 @@ int main(int argc, char* argv[]) {
 	cout << "observed_syms_A        : " << observed_syms_A        << "\n";
 	cout << "r_parameter            : " << CUBE_R_PARAM << "\n";
 	cout << "will early block       : " << CANEARLY << "\n";
-	if(CANEARLY > 0)
+	if(CANEARLY > 0) 
 		cout << "   minimum lines       : " << MIN_LINES << "\n";
 	cout << "will minimize          : " << MINIMIZE << "\n";
 	cout << "can forget             : " << CANFORGET << "\n";
