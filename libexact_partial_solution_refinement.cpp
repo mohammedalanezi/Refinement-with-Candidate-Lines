@@ -6,19 +6,15 @@ extern "C" {
 #include <fstream>
 #include <sstream>
 #include <vector>
-#include <unordered_set>
 #include <unordered_map>
 #include <string>
 #include <cstring>
 #include <tuple>
 #include <chrono>
-#include <algorithm>
 
-#include <fcntl.h>
-#include <unistd.h>
-#include <cstdlib>
-
-#define LIBEXACT 0 // determines if we use my custom search (faster) or libexact 
+#ifndef LIBEXACT
+#define LIBEXACT 0 
+#endif
 
 #ifndef TRACK_TIME
 #define TRACK_TIME 1
@@ -43,6 +39,9 @@ long partial_count = 0;
 long total_refinements = 0;
 int count_A = 0;
 int count_B = 0;
+
+int last_word_bits = 0;
+uint64_t last_word_mask = 0;
 
 __uint128_t all_points_mask; // bit (p-1) set means point p is on this line (points 1–100, so bits 0–99 used)
 
@@ -84,22 +83,7 @@ unordered_map<__uint128_t, int, U128Hash> cand_hash_A;
 struct VarInfo { int8_t sq, r, c, s; }; // 4 bytes per entry
 VarInfo var_lookup[2 * order * order * order + 1]; // index by var (1-based)
 
-auto start_time = chrono::steady_clock::now(); // Precompute masks
-
-// Debugging helpers (not used in hot path)
-void mask_print(__uint128_t m) {
-	uint64_t hi = (uint64_t)(m >> 64);
-	uint64_t lo = (uint64_t)m;
-	for (int i = 63; i >= 0; --i) {
-		cout << ((hi >> i) & 1);
-		if (i % 8 == 0 && i > 0) cout << " ";
-	}
-	for (int i = 63; i >= 0; --i) {
-		cout << ((lo >> i) & 1);
-		if (i % 8 == 0 && i > 0) cout << " ";
-	}
-	cout << endl;
-}
+auto start_time = chrono::steady_clock::now();
 
 /**
  * @brief Constructs a 128-bit __uint128_t from a list of point indices (only 100 bits are used).
@@ -224,7 +208,6 @@ void precomputeDataStructures() {
 	all_line_indices_A = new int[count_A];
 	for(int i = 0; i < count_A; i++)
 		all_line_indices_A[i] = i;
-		
 
 	cand_hash_A.reserve(count_A * 2); // halves load factor so we have 2x fewer collision chains
 	for (int i = 0; i < count_A; ++i)
@@ -288,9 +271,7 @@ void getIntersectingBLineIndices(int intersecting_indices[], int& intersection_c
 		}
 	if (!resultSet) return;
 
-	const int last_word_bits = count_B % 64;
-	const uint64_t last_word_mask = last_word_bits ? (1ULL << last_word_bits) - 1 : ~0ULL;
-
+	result[rows_B - 1] &= last_word_mask;
 	for (int w = 0; w < rows_B; ++w) {
 		uint64_t word = result[w];
 		if (w == rows_B - 1)
@@ -332,13 +313,9 @@ void getIntersectingBCovering(const int opposite_indices[], __uint128_t& union_m
 		}
 	if (!resultSet) return;
 
-	const int last_word_bits = count_B % 64;
-	const uint64_t last_word_mask = last_word_bits ? (1ULL << last_word_bits) - 1 : ~0ULL;
-
+	result[rows_B - 1] &= last_word_mask;
 	for (int w = 0; w < rows_B; ++w) {
 		uint64_t word = result[w];
-		if (w == rows_B - 1)
-			word &= last_word_mask;   // discard invalid bits
 		while (word) {
 			int bit = __builtin_ctzll(word);
 			int idx = w * 64 + bit;
@@ -429,24 +406,31 @@ int get_refinements(const int B_indices[], const int& B_count, const __uint128_t
 }
 #else
 /**
- * @brief Recursively counts the ways to select disjoint candidate lines that exactly cover all 100 grid points.
+ * @brief Recursively counts the ways to select a subset of candidate lines that together form an exact cover of all 100 grid points.
  *
- * Replaces our general-purpose exact-cover solve with a search specialized to this problem: every candidate line
- * has exactly `order` bits set, so any selection of lines whose union equals `all_points_mask` is automatically a
- * partition, overlap would shrink the union below the lines' combined weight, which is impossible once 
- * the union reaches exactly 100 bits. This means no explicit "no overlap" check or "used line" bookkeeping
- * is needed beyond `(m & covered) == 0`.
+ * The search enumerates subsets of the candidate lines given by `B_indices` (from index `idx` to `B_count-1`).  At each step the function considers the
+ * current line `idx` and branches into two possibilities: skip it or, if it does not overlap with already covered points, include it. The recursion stops
+ * when all points are covered (success) or when the end of the list is reached (failure).
  *
- * At each step, branches only on candidate lines that cover the lowest-indexed uncovered point, which keeps
- * the branching factor equal to however many candidates happen to cover that point. Recursion bottoms out
- * when `covered` reaches `all_points_mask`, contributing one to the count for that path. A previously-chosen
- * line can never be re-picked, since all of its bits are already folded into `covered` by the time it would
- * be considered again.
+ * Two pruning rules are applied before branching:
+ * 
+ * 1. If the union of the currently covered points and all remaining candidates (precomputed in `suffix[idx]`) does not equal the full set, a complete cover is impossible.
+ * 
+ * 2. If the number of already chosen lines plus the remaining lines is less than the required 10 lines, a cover cannot be formed (exact cover by exactly
+ *    10 lines is needed because each line covers exactly 10 points and there are 100 points total).
  *
- * @param B_indices Candidate B line indices to search over (same array passed to get_refinements).
- * @param B_count   Number of candidate lines in B_indices.
- * @param covered   Bitmask of grid points already covered by lines chosen earlier in the recursion (pass 0 at the top-level call).
- * @returns The number of distinct subsets of B_indices whose masks are pairwise disjoint and whose union equals all_points_mask.
+ * Because every candidate line covers exactly `order` (10) points, any disjoint selection whose union reaches 100 points automatically contains exactly 10
+ * lines and forms a partition; no additional bookkeeping for "used lines" is necessary beyond the overlap check `(m & covered) == 0`.
+ *
+ * @param B_indices Array of indices into the global candidate mask table `cand_masks_B` that defines the set of lines to search over.
+ * @param B_count   Total number of entries in `B_indices`.
+ * @param covered   Bitmask of grid points already covered by lines chosen in earlier recursive calls.
+ * @param idx       Current position in the `B_indices` array (the next candidate to consider).
+ * @param chosen    Number of lines selected so far on the current path.
+ * @param suffix    Precomputed array where `suffix[i]` is the bitwise OR of the masks of all candidates from index `i` to `B_count-1`.
+ *                  `suffix` must have length at least `B_count + 1`, with `suffix[B_count] == 0`.
+ * @returns The number of distinct subsets of the given candidate lines that are
+ *          pairwise disjoint and whose union equals the full set of 100 points (`all_points_mask`).
  */
 static int count_exact_covers(const int B_indices[], int B_count,
                               __uint128_t covered, int idx, int chosen,
@@ -516,6 +500,9 @@ int setup(int template_id) {
 	
 	intersecting_B_buf = new int[count_B];
 	
+	last_word_bits = count_B % 64;
+	last_word_mask = last_word_bits ? (1ULL << last_word_bits) - 1 : ~0ULL;
+	
 #if TRACK_TIME == 1
 	file_load_time = chrono::duration<double>(chrono::steady_clock::now() - start_time).count();
 #endif
@@ -537,33 +524,15 @@ int processLine(const int sym_A_idx[order]) {
     #endif
     int intersection_B_count = 0;
     __uint128_t union_B = 0;
-    getIntersectingBLineIndices(intersecting_B_buf, intersection_B_count,
-                                sym_A_idx, union_B);
+    getIntersectingBLineIndices(intersecting_B_buf, intersection_B_count, sym_A_idx, union_B);
     #if TRACK_TIME == 1
-    total_line_intersection_time +=
-        chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
+    total_line_intersection_time += chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
     #endif
 
     if (intersection_B_count < order)
         return -1;
 
     return get_refinements(intersecting_B_buf, intersection_B_count, union_B);
-}
-
-bool check_partial_solution_covering(const int sym_A_idx[order]) {
-    #if TRACK_TIME == 1
-    auto intersection_time = chrono::steady_clock::now();
-    #endif
-
-    __uint128_t union_B = 0;
-    getIntersectingBCovering(sym_A_idx, union_B);
-
-    #if TRACK_TIME == 1
-    double elapsed_3 = chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
-    total_line_covering_time += elapsed_3;
-    #endif
-
-    return union_B == all_points_mask;
 }
 
 bool check_partial_solution_covering(const int sym_A_idx[order], __uint128_t& union_B) {
@@ -598,10 +567,18 @@ void print_substep_timings_log(double creation_time,
 
 	cout << "\n======= SUBSTEP DEFINITION  =======\n";
 	cout << "When a partial solution is found in the SAT instance, we attempt to refine it into all its possible full solutions.\n";
+#if EARLY == 1
 	cout << "While looking for partial solutions, if they are incomplete, we check if they can extend to a full solution and block early if they cannot.\n";
+#endif
 	cout << "Each partial solution goes through a filter to process its compatible candidate lines, after which, these lines are checked to see if a solution is possible; skipping impossible partial solutions.\n";
+#if LIBEXACT == 1
 	cout << "The filtered candidate lines are created into a libexact instance and solved for all their possible refinements.\n";
+#else
+	cout << "The filtered candidate lines then used in a custom algorithm to count all their possible refinements.\n";
+#endif
+#if MINIMIZE == 1
 	cout << "Early blocking clauses and blocking clauses of partial solutions with no refinements are minimized to keep their clauses short.\n";
+#endif
 
 #if TRACK_TIME == 1
 	double input_total = file_load_time + precompute_time;

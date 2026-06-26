@@ -2,7 +2,6 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
-#include <span>
 #include <string>
 #include <chrono>
 #include <cstdlib>
@@ -11,7 +10,6 @@
 #include "cadical.hpp"
 #include "exhaustive.hpp"
 
-#define MULTI_THREADING 0 // if I wanna add multi threading to substep then i need a worker and pool system
 #define COPY_MODE 1 // copy (1) faster than assumption mode (0) since we don't encounter clause poisoning, this is unknown for massively larger templates (e.g. 4) 
 #define FULL_DUMP 0 // if we dump irredundant clauses/unit clauses to march_cu
 #define MAX_CUBES 0 // maximum cubes we process, infinite when <=0, this is for early termination
@@ -20,6 +18,8 @@
 #define CANEARLY 1 // 1 is fastest
 #define MINIMIZE 0 // 0 is fastest
 #define CANFORGET 1 // 1 is fastest
+
+#define LIBEXACT 1 // determines if we use my custom search (1, faster) or libexact (0, slower) 
 
 #define MIN_LINES 5 // 3-5 faster than 6 with no minimzation 
 
@@ -409,16 +409,11 @@ struct FastPolicy {
 // Returns the next free auxiliary variable index.
 // ---------------------------------------------------------------
 int buildFormula(CaDiCaL::Solver& solver, const vector<vector<vector<int>>>& tmpl) {
-	// ---- Declare base variables (3 squares × order^3 each) ----
+	// ---- Declare base variables (3 squares * order^3 each) ----
 	int total_base_vars = latin_squares * order * order * order;
-	solver.declare_more_variables(total_base_vars);
-
-	// Auxiliary variable counter (for common-transversal section)
 	int next_aux = total_base_vars + 1;
-	auto new_var_fn = [&]() -> int {
-		solver.declare_one_more_variable();
-		return next_aux++;
-	};
+	
+	solver.declare_more_variables(total_base_vars);
 
 	// ---- Latin-square constraints ----
 	for (int sq = 0; sq < latin_squares; ++sq)
@@ -636,7 +631,7 @@ long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int
 	static double create_elapsed = -1.0;
 #endif
 
-	int result = copy.solve();
+	copy.solve();
 
 #if TRACK_TIME
 	double solve_elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
