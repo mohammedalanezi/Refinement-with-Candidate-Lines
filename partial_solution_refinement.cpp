@@ -1,7 +1,3 @@
-extern "C" {
-#include "exact.h"
-}
-
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -11,10 +7,6 @@ extern "C" {
 #include <cstring>
 #include <tuple>
 #include <chrono>
-
-#ifndef LIBEXACT
-#define LIBEXACT 0 
-#endif
 
 #ifndef TRACK_TIME
 #define TRACK_TIME 1
@@ -28,7 +20,7 @@ using namespace std;
 const int order = 10;
 #endif
 
-const vector<int> observed;
+auto start_time = chrono::steady_clock::now();
 
 uint64_t* intersects_once_BA = nullptr;
 int rows_B = 0;
@@ -50,11 +42,33 @@ vector<__uint128_t> cand_masks_B;
 
 static int* intersecting_B_buf = nullptr;
 
-#if TRACK_TIME == 1 // This tracking probably doesn't work the best when we are multithreading, TODO: fix that
-double total_libexact_creation_time = 0.0;
-double total_libexact_solve_time = 0.0;
+const vector<vector<vector<int>>> trivialTemplate = { {
+ {1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+ {1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+ {1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+ {1, 1, 1, 1, 1, 1, 1, 1, 1, 1},
+ {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+ {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+ {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+ {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+ {0, 0, 0, 0, 0, 0, 0, 0, 0, 0},
+ {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}},
+{{1, 1, 1, 1, 0, 0, 0, 0, 0, 0},
+ {1, 1, 1, 1, 0, 0, 0, 0, 0, 0},
+ {1, 1, 1, 1, 0, 0, 0, 0, 0, 0},
+ {1, 1, 1, 1, 0, 0, 0, 0, 0, 0},
+ {1, 1, 1, 1, 0, 0, 0, 0, 0, 0},
+ {1, 1, 1, 1, 0, 0, 0, 0, 0, 0},
+ {1, 1, 1, 1, 0, 0, 0, 0, 0, 0},
+ {1, 1, 1, 1, 0, 0, 0, 0, 0, 0},
+ {1, 1, 1, 1, 0, 0, 0, 0, 0, 0},
+ {1, 1, 1, 1, 0, 0, 0, 0, 0, 0}}};
 
-double file_load_time = 0.0;
+#if TRACK_TIME == 1 // This tracking probably doesn't work the best when we are multithreading, TODO: fix that
+double total_refinement_early_blocking = 0.0;
+double total_refinement_solve_time = 0.0;
+
+double candidate_find_time = 0.0;
 double precompute_time = 0.0;
 
 double total_line_intersection_time = 0.0;
@@ -83,7 +97,27 @@ unordered_map<__uint128_t, int, U128Hash> cand_hash_A;
 struct VarInfo { int8_t sq, r, c, s; }; // 4 bytes per entry
 VarInfo var_lookup[2 * order * order * order + 1]; // index by var (1-based)
 
-auto start_time = chrono::steady_clock::now();
+/**
+ * @brief Reverses a SAT variable encoding into (square, row, col, symbol) tuple.
+ * SAT variables are assigned in row-major order across two squares, with the innermost dimension being symbol.
+ * @param var_index   1-based SAT variable index.
+ * @param num_squares Number of squares.
+ * @param num_rows    Number of rows per square.
+ * @param num_cols    Number of columns per square.
+ * @param num_symbols Number of symbols per square.
+ * @returns A tuple of (square, row, col, symbol), all 0-based.
+ */
+tuple<int,int,int,int> indexTo4Tuple(int var_index, int num_squares, int num_rows, int num_cols, int num_symbols) {
+	int vars_per_square = num_rows * num_cols * num_symbols;
+	int adjusted = var_index - 1;
+	int square = adjusted / vars_per_square;
+	int offset = adjusted % vars_per_square;
+	int symbol = offset % num_symbols;
+	int remainder = offset / num_symbols;
+	int col = remainder % num_cols;
+	int row = remainder / num_cols;
+	return {square, row, col, symbol};
+}
 
 /**
  * @brief Constructs a 128-bit __uint128_t from a list of point indices (only 100 bits are used).
@@ -109,68 +143,187 @@ bool intersectsExactlyOnce(__uint128_t m1, __uint128_t m2) {
 	return c != 0 && (c & (c - 1)) == 0;
 }
 
-/**
- * @brief Parses a space-separated list of integers from a prefixed text line.
- * Returns an empty vector if the line is empty or does not begin with the expected prefix character. The prefix and the character immediately after it (assumed to be a space) are stripped before parsing.
- * @param line   The raw text line to parse.
- * @param prefix The expected first character of the line ('R' or 'N').
- * @returns A vector of integers parsed from the remainder of the line, or an empty vector if the line does not match the prefix.
- */
-vector<int> parse_line(const string& line, char prefix) {
-	vector<int> result;
-	if (line.empty() || line[0] != prefix) 
-		return result;
-	istringstream iss(line.substr(2));
-	int val;
-	while (iss >> val) 
-		result.push_back(val);
-	return result;
+struct CandidatePolicy { 
+	mutable int is_A = false;
+	explicit operator bool() const { return true; }
+	bool operator()(const std::vector<int>& solution) const {
+		if(is_A)
+        	cand_masks_A.push_back(make_mask(solution));
+		else
+        	cand_masks_B.push_back(make_mask(solution));
+		return true;
+	}
+	static constexpr bool notifyAssignment = false;
+	static constexpr bool earlyClause = false;
+	static constexpr bool minimizeClause = false;
+};
+
+static void addCardinalityClauses(CaDiCaL::Solver &solver, const std::vector<int> &var_list, int min_val, int max_val, int &var_cnt) {
+    int n = (int)var_list.size();
+    int k = max_val + 1;   // at most max_val  -> forbid j == k
+    int l = min_val;       // at least min_val -> enforce j == l for i=n
+
+    // Allocate auxiliary variables s[i][j] (0 <= i <= n, 0 <= j <= k)
+    int num_aux = (n + 1) * (k + 1);
+    int need_max = var_cnt + num_aux;
+    solver.resize(need_max);          // ensure the solver knows these variables
+
+    std::vector<std::vector<int>> s(n + 1, std::vector<int>(k + 1));
+    for (int i = 0; i <= n; ++i)
+        for (int j = 0; j <= k; ++j)
+            s[i][j] = ++var_cnt;       // assign new variable
+
+    // 1) "0 variables are always true of variables x1..xi"
+    for (int i = 0; i <= n; ++i) {
+        solver.add(s[i][0]);
+        solver.add(0);
+    }
+
+    // 2) "j >= 1 of nothing is always false"
+    for (int j = 1; j <= k; ++j) {
+        solver.add(-s[0][j]);
+        solver.add(0);
+    }
+
+    // 3) Lower bound: at least min_val of all n variables must be true
+    for (int j = 1; j <= l; ++j) {
+        solver.add(s[n][j]);
+        solver.add(0);
+    }
+
+    // 4) Upper bound: at most max_val -> never allow k = max_val+1 true
+    for (int i = 1; i <= n; ++i) {
+        solver.add(-s[i][k]);
+        solver.add(0);
+    }
+
+    // 5) Propagation clauses
+    for (int i = 1; i <= n; ++i)
+        for (int j = 1; j <= k; ++j) {
+            // s[i-1][j]  ->  s[i][j]
+            solver.add(-s[i-1][j]);
+            solver.add(s[i][j]);
+            solver.add(0);
+
+            // x_i ∧ s[i-1][j-1]  ->  s[i][j]
+            solver.add(-var_list[i-1]);
+            solver.add(-s[i-1][j-1]);
+            solver.add(s[i][j]);
+            solver.add(0);
+
+            if (j <= l) {
+                // s[i][j]  ->  s[i-1][j] ∨ x_i
+                solver.add(-s[i][j]);
+                solver.add(s[i-1][j]);
+                solver.add(var_list[i-1]);
+                solver.add(0);
+
+                // s[i][j]  ->  s[i-1][j-1]
+                solver.add(-s[i][j]);
+                solver.add(s[i-1][j-1]);
+                solver.add(0);
+            }
+        }
 }
 
-/**
- * @brief Loads candidate lines from a text file and converts them to Masks.
- * Each line in the file beginning with 'R' or 'N' is parsed as a list of point indices and converted to a __uint128_t. 
- * @param path Path to the candidate lines file.
- * @returns A tuple of: the vector of Masks, and the total number of lines loaded.
- */
-tuple<vector<__uint128_t>, int> load_candidate_lines_file(const string& path) {
-	ifstream f(path);
-	vector<__uint128_t> lines;
-	string line;
-	while (getline(f, line)) {
-		if (line.empty()) continue;
-		char prefix = line[0];
-		if (prefix == 'R' || prefix == 'N') {
-			vector<int> nums = parse_line(line, prefix);
-			if (!nums.empty()) {
-				lines.push_back(make_mask(nums));
+static int getTemplateBit(const vector<vector<vector<int>>> tmpl, int r, int c, int bit) {
+	if (bit >= 2)
+		return tmpl[bit - 2][r][c];
+	else
+		return trivialTemplate[bit][r][c];
+}
+
+static void createCandidateEncoding(CaDiCaL::Solver &solver, const vector<vector<vector<int>>> tmpl, bool isRelational, int frequencySquare) {
+	solver.declare_more_variables(100);
+	int variable_count = 100; 
+	int number_bits = tmpl.size() + trivialTemplate.size();
+
+	for(int r = 0; r < order; r++) {
+		vector<int> row_vars(10);
+		vector<int> col_vars(10);
+		for(int c = 0; c < order; c++) {
+			row_vars[c] = r * order + c + 1;
+			col_vars[c] = c * order + r + 1;
+		}
+		addCardinalityClauses(solver, row_vars, 1, 1, variable_count);
+		addCardinalityClauses(solver, col_vars, 1, 1, variable_count);
+	}
+
+	unordered_map<int, vector<int>> weightBuckets;
+	for(int weight = 0; weight < number_bits; weight++)
+		weightBuckets[weight] = {};
+		
+	for(int r = 0; r < order; r++) // only include relational or non-relation points
+		for(int c = 0; c < order; c++) {
+			int weight = 0;
+			for(int i = 0; i < number_bits; i++)
+				weight += getTemplateBit(tmpl, r, c, i);
+			if(isRelational) {
+				if(getTemplateBit(tmpl, r, c, frequencySquare) == 0)
+					solver.clause(-(r * order + c + 1));
+				else
+					weightBuckets[weight].push_back(r * order + c + 1);
+			} else { 
+				if(getTemplateBit(tmpl, r, c, frequencySquare) == 1)
+					solver.clause(-(r * order + c + 1));
+				else
+					weightBuckets[weight].push_back(r * order + c + 1);
 			}
 		}
+	
+	if(isRelational) {
+		if (weightBuckets[4].size() > 0)
+			addCardinalityClauses(solver, weightBuckets[4], 1, 1, variable_count);  // exactly one weight-4
+		if (weightBuckets[2].size() > 0)
+			addCardinalityClauses(solver, weightBuckets[2], 9, 9, variable_count);  // exactly nine weight-2
+	} else {
+		if (weightBuckets[2].size() > 0)
+			addCardinalityClauses(solver, weightBuckets[2], 6, 6, variable_count);  // exactly six weight-2
+		if (weightBuckets[0].size() > 0)
+			addCardinalityClauses(solver, weightBuckets[0], 4, 4, variable_count);  // exactly four weight-0
 	}
-	cout << "Loaded candidate line file: " << path << endl;
-	return {lines, (int)lines.size()};
 }
 
-/**
- * @brief Reverses a SAT variable encoding into (square, row, col, symbol) tuple.
- * SAT variables are assigned in row-major order across two squares, with the innermost dimension being symbol.
- * @param var_index   1-based SAT variable index.
- * @param num_squares Number of squares.
- * @param num_rows    Number of rows per square.
- * @param num_cols    Number of columns per square.
- * @param num_symbols Number of symbols per square.
- * @returns A tuple of (square, row, col, symbol), all 0-based.
- */
-tuple<int,int,int,int> indexTo4Tuple(int var_index, int num_squares, int num_rows, int num_cols, int num_symbols) {
-	int vars_per_square = num_rows * num_cols * num_symbols;
-	int adjusted = var_index - 1;
-	int square = adjusted / vars_per_square;
-	int offset = adjusted % vars_per_square;
-	int symbol = offset % num_symbols;
-	int remainder = offset / num_symbols;
-	int col = remainder % num_cols;
-	int row = remainder / num_cols;
-	return {square, row, col, symbol};
+void find_candidate_lines(const vector<vector<vector<int>>> tmpl, const bool isSecond) { // isSecond = true -> second square, false -> third square
+#if TRACK_TIME == 1
+	auto timer = chrono::steady_clock::now();
+#endif
+	CaDiCaL::Solver relationalCandidateSolver;
+	CaDiCaL::Solver nonRelationalCandidateSolver;
+
+	static vector<int> candidateObserve(100);
+	for(int i = 0; i < 100; i++)
+		candidateObserve[i] = i+1;
+	
+	ExhaustiveSearchOptions candidateOptions;
+	candidateOptions.to_observe = candidateObserve;
+	candidateOptions.only_neg = true;
+	
+	int frequencySquare = isSecond ? 2 : 3;
+	createCandidateEncoding(relationalCandidateSolver, tmpl, true, frequencySquare);
+	createCandidateEncoding(nonRelationalCandidateSolver, tmpl, false, frequencySquare);
+
+	CandidatePolicy candidatePolicy;
+	candidatePolicy.is_A = isSecond;
+
+	ExhaustiveSearch<CandidatePolicy> relationalCandidatePropagator(&relationalCandidateSolver, candidateOptions, candidatePolicy);
+	ExhaustiveSearch<CandidatePolicy> nonRelationalCandidatePropagator(&nonRelationalCandidateSolver, candidateOptions, candidatePolicy);
+
+	relationalCandidateSolver.solve();
+	nonRelationalCandidateSolver.solve();
+	
+	if(isSecond)
+		count_A = cand_masks_A.size();
+	else
+		count_B = cand_masks_B.size();
+
+	cout << "		Found " << (isSecond ? count_A : count_B) << " candidate lines for square " << (isSecond ? "2" : "3");
+	
+#if TRACK_TIME == 1
+	cout << " in " << chrono::duration<double>(chrono::steady_clock::now() - timer).count() << "s\n";
+#else
+	cout << "\n";
+#endif
 }
 
 /**
@@ -217,11 +370,15 @@ void precomputeDataStructures() {
 		auto [sq, r, c, s] = indexTo4Tuple(var, 2, order, order, order);
 		var_lookup[var] = { (int8_t)sq, (int8_t)r, (int8_t)c, (int8_t)s };
 	}
+	
+	intersecting_B_buf = new int[count_B];
+	
+	last_word_bits = count_B % 64;
+	last_word_mask = last_word_bits ? (1ULL << last_word_bits) - 1 : ~0ULL;
 
 	auto end = chrono::steady_clock::now();
 	double elapsed = chrono::duration<double>(end - start).count();
-	cout << "Precomputed intersections using masks in " << elapsed << " seconds." << endl;
-	//cout << "  A-B: " << cand_lines_A.size() << "x" << cand_lines_B.size() << " = " << (cand_lines_A.size() * cand_lines_B.size()) << " entries" << endl;
+	cout << "	Precomputed intersections using masks in " << elapsed << " seconds." << endl;
 }
 
 /**
@@ -326,85 +483,6 @@ void getIntersectingBCovering(const int opposite_indices[], __uint128_t& union_m
 	}
 }
 
-#if LIBEXACT == 1
-/**
- * @brief Counts valid refinements using libexact exhaustive exact cover search.
- *
- * Sets up an exact cover instance with 200 rows (100 grid points for A, 100 for B) and
- * A_count + B_count columns (one per candidate line). 
- * 
- * Each candidate line declares entries for the grid points it covers. libexact then enumerates 
- * all ways to choose order non-overlapping A lines that cover all 100 A points, paired with 
- * order non-overlapping B lines that cover all 100 B points. 
- *
- * @param trans_A   Number of A lines already determined by the partial solution.
- * @param trans_B   Number of B lines already determined by the partial solution.
- * @param A_indices Candidate A line indices that passed parallel + intersection filtering.
- * @param A_count   Number of candidate A lines.
- * @param B_indices Candidate B line indices that passed parallel + intersection filtering.
- * @param B_count   Number of candidate B lines.
- * @param union_A   OR of all masks in A_indices (precomputed, 0 if trans_A == order).
- * @param union_B   OR of all masks in B_indices (precomputed, 0 if trans_B == order).
- * @returns The total number of valid refinements found.
- */
-int get_refinements(const int B_indices[], const int& B_count, const __uint128_t union_B) {
-#if TRACK_TIME == 1
-	auto timer = chrono::steady_clock::now();
-#endif
-	if (union_B != all_points_mask) {
-		#if TRACK_TIME == 1
-		total_libexact_creation_time += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
-		#endif
-		return -1;
-	}
-
-	if (B_count == order) return 1;
-
-	exact_t* e = exact_alloc();
-
-	// 1. declare rows: 100 grid points for B
-	for (int p = 0; p < order * order; p++) { // each point must be covered by exactly one line in its respective square
-		exact_declare_row(e, p + 1, 1);
-	}
-
-	// 2. declare columns: B candidate lines (colmum IDs 1...B_count)
-	for (int i = 0; i < B_count; i++)
-		exact_declare_col(e, i + 1, 1);
-
-#if TRACK_TIME == 1
-	double creation_elapsed = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
-	timer = chrono::steady_clock::now();
-#endif
-
-	// 3. declare entries for B lines: for each B candidate, record which grid points it covers
-	for (int i = 0; i < B_count; i++) {
-		__uint128_t mask = cand_masks_B[B_indices[i]];
-		uint64_t lo = (uint64_t)mask;
-		uint64_t hi = (uint64_t)(mask >> 64);
-		while (lo) { int b = __builtin_ctzll(lo); exact_declare_entry(e, b + 1, i + 1); lo &= lo - 1; }
-		while (hi) { int b = __builtin_ctzll(hi); exact_declare_entry(e, 64 + b + 1, i + 1); hi &= hi - 1; }
-	}
-
-#if TRACK_TIME == 1
-	total_libexact_creation_time += creation_elapsed + chrono::duration<double>(chrono::steady_clock::now() - timer).count();
-	timer = chrono::steady_clock::now();
-#endif
-
-	// 4. enumerate all solutions: each solution is a valid B square
-	int soln_size;
-	const int* soln; // this should give us a int array of the columns picked in the solution
-	long int sol_count = 0;
-	while ((soln = exact_solve(e, &soln_size)) != NULL)
-		sol_count++;
-	exact_free(e);
-
-#if TRACK_TIME == 1
-	total_libexact_solve_time += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
-#endif
-
-	return sol_count;
-}
-#else
 /**
  * @brief Recursively counts the ways to select a subset of candidate lines that together form an exact cover of all 100 grid points.
  *
@@ -463,7 +541,7 @@ int get_refinements(const int B_indices[], const int& B_count, const __uint128_t
 #endif
     if (union_B != all_points_mask) {
         #if TRACK_TIME == 1
-        total_libexact_creation_time += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
+        total_refinement_early_blocking += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
         #endif
         return -1;
     }
@@ -478,42 +556,10 @@ int get_refinements(const int B_indices[], const int& B_count, const __uint128_t
 	int sol_count = count_exact_covers(B_indices, B_count, 0, 0, 0, suffix);
 
 #if TRACK_TIME == 1
-    total_libexact_solve_time += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
+    total_refinement_solve_time += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 #endif
 
     return sol_count;
-}
-#endif
-
-long int get_refinement_count() { return total_refinements; }
-long int get_skipped_count()    { return skipped_partial_solutions; }
-
-int setup(int template_id) {
-	cout << "Loading candidate lines from files..." << endl;
-
-	string parent_dir = "../refinements and candidate lines/";
-	string candidate_lines_2_path = parent_dir + "2-candidate_lines/" + to_string(template_id) + "-candidate_lines.txt";
-	string candidate_lines_3_path = parent_dir + "3-candidate_lines/" + to_string(template_id) + "-candidate_lines.txt";
-
-	tie(cand_masks_A, count_A) = load_candidate_lines_file(candidate_lines_2_path);
-	tie(cand_masks_B, count_B) = load_candidate_lines_file(candidate_lines_3_path);
-	
-	intersecting_B_buf = new int[count_B];
-	
-	last_word_bits = count_B % 64;
-	last_word_mask = last_word_bits ? (1ULL << last_word_bits) - 1 : ~0ULL;
-	
-#if TRACK_TIME == 1
-	file_load_time = chrono::duration<double>(chrono::steady_clock::now() - start_time).count();
-#endif
-	
-	cout << "Precomputing all data structures..." << endl;
-	precomputeDataStructures();
-	
-#if TRACK_TIME == 1
-	precompute_time = chrono::duration<double>(chrono::steady_clock::now() - start_time).count() - file_load_time;
-#endif
-	return 0;
 }
 
 int processLine(const int sym_A_idx[order]) {
@@ -560,6 +606,27 @@ bool solve_partial_solution(const int sym_A_idx[order]) {
     return true;
 }
 
+long int get_refinement_count() { return total_refinements; }
+long int get_skipped_count()    { return skipped_partial_solutions; }
+
+int setup(const vector<vector<vector<int>>> tmpl) {
+	cout << "	Finding candidate lines from template..." << endl;
+	find_candidate_lines(tmpl, true);
+	find_candidate_lines(tmpl, false);
+	
+#if TRACK_TIME == 1
+	candidate_find_time = chrono::duration<double>(chrono::steady_clock::now() - start_time).count();
+#endif
+	
+	cout << "Precomputing all data structures..." << endl;
+	precomputeDataStructures();
+	
+#if TRACK_TIME == 1
+	precompute_time = chrono::duration<double>(chrono::steady_clock::now() - start_time).count() - candidate_find_time;
+#endif
+	return 0;
+}
+
 void print_substep_timings_log(double creation_time,
 		double total_minimize_setup, double total_minimize_remove,
 		double total_cube_gen_time, double total_cube_creation_time, double total_cube_solve_time) {
@@ -571,20 +638,16 @@ void print_substep_timings_log(double creation_time,
 	cout << "While looking for partial solutions, if they are incomplete, we check if they can extend to a full solution and block early if they cannot.\n";
 #endif
 	cout << "Each partial solution goes through a filter to process its compatible candidate lines, after which, these lines are checked to see if a solution is possible; skipping impossible partial solutions.\n";
-#if LIBEXACT == 1
-	cout << "The filtered candidate lines are created into a libexact instance and solved for all their possible refinements.\n";
-#else
 	cout << "The filtered candidate lines then used in a custom algorithm to count all their possible refinements.\n";
-#endif
 #if MINIMIZE == 1
 	cout << "Early blocking clauses and blocking clauses of partial solutions with no refinements are minimized to keep their clauses short.\n";
 #endif
 
 #if TRACK_TIME == 1
-	double input_total = file_load_time + precompute_time;
-	double libexact_total = total_libexact_creation_time + total_libexact_solve_time;
+	double input_total = candidate_find_time + precompute_time;
+	double refinement_total = total_refinement_early_blocking + total_refinement_solve_time;
 	double line_total =  total_line_intersection_time + total_line_covering_time;
-	double substep_total = line_total + libexact_total + input_total;
+	double substep_total = line_total + refinement_total + input_total;
 
 	double minimize_total = total_minimize_setup + total_minimize_remove;
 	double post_processing = minimize_total;
@@ -596,7 +659,7 @@ void print_substep_timings_log(double creation_time,
     double other = elapsed - accounted;
 
 	cout << "\n=== WALL TIMINGS ===\n";
-	cout << "   Cube (SAT -> Solving + Early -> Minimize) -> Substep (INPUT -> FILTER -> LIBEXACT)\n";
+	cout << "   Cube (SAT -> Solving + Early -> Minimize) -> Substep (INPUT -> FILTER -> REFINEMENT)\n";
 	
 	cout << "Cube:\n";
 	cout << "   Generation: " << total_cube_gen_time << "s\n"; // march_cu
@@ -618,7 +681,7 @@ void print_substep_timings_log(double creation_time,
 	cout << "   Total: " << minimize_total << "s\n";
 	#endif
 	cout << "\nInput:\n";
-	cout << "   Reading from Candidate Lines files took: " << file_load_time << "s\n";
+	cout << "   Finding Candidate Lines took: " << candidate_find_time << "s\n";
 	cout << "   Precomputing the required datastructures took: " << precompute_time << "s\n";
 	cout << "   Total: " << input_total << "s\n";
 
@@ -627,19 +690,12 @@ void print_substep_timings_log(double creation_time,
 	cout << "   Keep Valid Intersecting Lines: " << total_line_intersection_time << "s\n";
 	cout << "   Total: " << line_total << "s\n";
 
-	#if LIBEXACT == 1
-	cout << "Libexact:\n";
-	cout << "   Libexact Creation: " << total_libexact_creation_time << "s\n";
-	cout << "   Libexact Solving: " << total_libexact_solve_time << "s\n";
-	cout << "   Total: " << libexact_total << "s\n";
-	#else
 	cout << "Refinement:\n";
-	cout << "   Creation: " << total_libexact_creation_time << "s (early covering check)\n";
-	cout << "   Solving: " << total_libexact_solve_time << "s\n";
-	cout << "   Total: " << libexact_total << "s\n";
-	#endif
+	cout << "   Creation: " << total_refinement_early_blocking << "s (early covering check)\n";
+	cout << "   Solving: " << total_refinement_solve_time << "s\n";
+	cout << "   Total: " << refinement_total << "s\n";
 	
-	cout << "Substep Total: " << line_total + libexact_total + input_total << "s\n";
+	cout << "Substep Total: " << line_total + refinement_total + input_total << "s\n";
 	cout << "Total: " << elapsed << "s\n";
 	cout << "Other/Extra: " << other << "s\n";
 #endif

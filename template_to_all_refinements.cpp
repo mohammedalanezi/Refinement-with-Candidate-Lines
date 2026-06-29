@@ -19,8 +19,6 @@
 #define MINIMIZE 0 // 0 is fastest
 #define CANFORGET 1 // 1 is fastest
 
-#define LIBEXACT 1 // determines if we use my custom search (1, faster) or libexact (0, slower) 
-
 #define MIN_LINES 5 // 3-5 faster than 6 with no minimzation 
 
 using namespace std; 
@@ -35,6 +33,8 @@ const int latin_squares = 3;
 
 // max variable index for square Q (sq=0): vars 1 ... order^3, sent to march_cu's -m flag so it only branches on Q's variables
 const int Q_MAX_VAR = order * order * order;  // = 1000
+
+vector<vector<vector<int>>> tmpl(2);
 
 double init_creation_time = 0.0f;
 double total_cube_creation_time = 0.0f;
@@ -57,10 +57,11 @@ string g_march_cu_path; // Path to the march_cu binary; set in main() from march
 // Increase this to get more cubes (each harder cube). We wait to solve each cube in a couple minutes at most but not too fast where creation/destruction of cadical slows it down.
 int CUBE_R_PARAM = 20; // (when we rebuild a solver for each cube) 20 seems to be the fastest time after naive testing of various values between 5 and 50
 int CUBE_LIMIT = 0; // Max number of cubes that will be solved
+int CUBE_START = 0; // The cube to start solving from
 
 int SAT_SEED = 0; // Seed of the Cubes, <= -1 adds no seed
 
-#include "libexact_partial_solution_refinement.cpp"
+#include "partial_solution_refinement.cpp"
 
 // ---------------------------------------------------------------
 // Variable layout
@@ -88,18 +89,16 @@ inline int var(int sq, int r, int c, int s) {
 // A '1' in the template means the cell belongs to the "relational"
 // (symbol 0–3) partition; '0' means the "non-relational" (4–9) partition.
 // ---------------------------------------------------------------
-vector<vector<vector<int>>> unloadTemplate(const string& path) {
-	vector<vector<vector<int>>> tmpl(2);
+void unloadTemplate(const string& path) {
 	ifstream f(path);
 	if (!f.is_open()) {
 		cerr << "Cannot open template file: " << path << "\n";
-		return tmpl;
+		return;
 	}
 	string line;
 	int line_no = 0;
 	while (getline(f, line)) {
-		// Strip trailing whitespace / CR
-		while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' '))
+		while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) // Strip trailing whitespace / CR
 			line.pop_back();
 
 		if (!line.empty()) {
@@ -115,7 +114,6 @@ vector<vector<vector<int>>> unloadTemplate(const string& path) {
 		}
 		++line_no;
 	}
-	return tmpl;
 }
 
 // ---------------------------------------------------------------
@@ -502,7 +500,7 @@ static vector<vector<int>> parseCubesFile(const string& path) { // Parses an .ic
 //   2. Shelling out to march_cu with:
 //        -r CUBE_R_PARAM   (stop once this many free vars have been removed)
 //        -m Q_MAX_VAR      (only branch on square Q's variables, i.e. vars 1-1000, so every cube fixes a distinct partial assignment of Q
-//                           and libexact sees no duplicate work across cubes)
+//                           and refinement sees no duplicate work across cubes)
 //   3. Parsing the resulting .icnf file
 //
 // Temp files are written alongside the template in parent_dir and are
@@ -658,13 +656,6 @@ long long runEncoding(const string& template_path, int template_id, int observed
 	auto timer = chrono::steady_clock::now();
 	cout << "Running Encoding:\n";
 
-	cout << "	Loading template from: " << template_path << "\n";
-	auto tmpl = unloadTemplate(template_path);
-	if (tmpl[0].empty() || tmpl[1].empty()) {
-		cerr << "Failed to load a valid template.\n";
-		return -1;
-	}
-
 	cout << "	Generating Cubes: march_cu (path=" << g_march_cu_path << ", -r=" << CUBE_R_PARAM << ", -m=" << Q_MAX_VAR << " [Q vars only]";
 	if (CUBE_LIMIT > 0)
 		cout << ", -l=" << CUBE_LIMIT;
@@ -714,7 +705,7 @@ long long runEncoding(const string& template_path, int template_id, int observed
 #endif
 
 	cout << "	Solving Cubes:" << endl;
-	for (int i = 0; i < cube_amount; ++i) {
+	for (int i = CUBE_START; i < cube_amount; ++i) {
 		total += solveOneCube(tmpl, cubes[i], i, propagator);
 		if(i % interval == 0)
 			cout << i+1 << "/" << cubes.size() << ": average solve: " << total_cube_solve_time/(i + 1) << "s, average create: " << total_cube_creation_time/(i + 1) << "s, ETA: " << cubes.size() * (total_cube_solve_time/(i + 1) + total_cube_creation_time/(i + 1)) << "s" << endl;
@@ -733,18 +724,23 @@ long long runEncoding(const string& template_path, int template_id, int observed
 // ---------------------------------------------------------------
 int main(int argc, char* argv[]) {
 	if (argc < 2) {
-		cerr << "Usage: " << argv[0] << " <template_id> (# of free vars to remove) (seed) (maximum # of cubes)\n";
+		cerr << "Usage: " << argv[0] << " <template_id> (# of free vars to remove) (starting cube) (seed) (maximum # of cubes)\n";
 		return 1;
 	}
 
-	int template_id     = atoi(argv[1]) + 1; // match Python: template_id = int(sys.argv[2]) + 1
+	// TODO: read in the template as a binary file, 200 bits each template (100 per square)
+	// first i need to edit my template finding code to output in a single binary file
+
+	int template_id     = atoi(argv[1]) + 1; 
 	int observed_syms_A = 10;
 	if (argc > 2)
 		CUBE_R_PARAM = atoi(argv[2]);
 	if (argc > 3)
-		SAT_SEED = atoi(argv[3]);
+		CUBE_START = atoi(argv[3]);
 	if (argc > 4)
-		CUBE_LIMIT = atoi(argv[4]);
+		SAT_SEED = atoi(argv[4]);
+	if (argc > 5)
+		CUBE_LIMIT = atoi(argv[5]);
 
 	string parent_dir    = "../";
 	string template_path = parent_dir + "refinements and candidate lines/templates/" + to_string(template_id) + "-template.txt";
@@ -762,6 +758,7 @@ int main(int argc, char* argv[]) {
 	cout << "=== Finding all partial solutions for template " << (template_id - 1) << " ===\n";
 	cout << "observed_syms_A        : " << observed_syms_A        << "\n";
 	cout << "r_parameter            : " << CUBE_R_PARAM << "\n";
+	cout << "starting from cube     : " << CUBE_START << "\n";
 	cout << "will early block       : " << CANEARLY << "\n";
 	if(CANEARLY > 0) 
 		cout << "   minimum lines       : " << MIN_LINES << "\n";
@@ -780,8 +777,15 @@ int main(int argc, char* argv[]) {
 		cerr << "At least one symbol transversal must be observed in either square.\n";
 		return 1;
 	}
+	
+	cout << "	Loading template from: " << template_path << "\n";
+	unloadTemplate(template_path);
+	if (tmpl[0].empty() || tmpl[1].empty()) {
+		cerr << "Failed to load a valid template.\n";
+		return -1;
+	}
 
-	setup(template_id);
+	setup(tmpl);
 
 	long long sol_count = runEncoding(template_path, template_id, observed_syms_A, CANFORGET);
 

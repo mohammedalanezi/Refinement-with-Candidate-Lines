@@ -60,10 +60,10 @@ $(EXACTDIR)/util.o: $(EXACTDIR)/util.c $(EXACTDIR)/util.h
 libexact: $(SRC_LIBEXACT) $(EXACT_OBJS)
 	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o $(TARGET_LIBEXACT) $(SRC_LIBEXACT) $(EXACT_OBJS) $(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
 
-complete: $(SRC_COMPLETE) $(EXACT_OBJS) libexact_partial_solution_refinement.cpp
+complete: $(SRC_COMPLETE) $(EXACT_OBJS) partial_solution_refinement.cpp
 	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o $(TARGET_COMPLETE) $(SRC_COMPLETE) $(EXACT_OBJS) $(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
 
-asan: $(SRC_COMPLETE) $(EXACT_OBJS) libexact_partial_solution_refinement.cpp
+asan: $(SRC_COMPLETE) $(EXACT_OBJS) partial_solution_refinement.cpp
 	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_ASAN) -o $(TARGET_COMPLETE_ASAN) $(SRC_COMPLETE) $(EXACT_OBJS) \
 	$(LDFLAGS_BASE) $(LDFLAGS_ASAN)
 
