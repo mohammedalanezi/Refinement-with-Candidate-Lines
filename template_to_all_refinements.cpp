@@ -79,41 +79,52 @@ inline int var(int sq, int r, int c, int s) {
 }
 
 // ---------------------------------------------------------------
-// Template loading
-//
-// Template file layout (matching unloadTemplate in helpers.py):
-//   Lines 0–9   -> Q's template  (template[0][row][col] ∈ {0,1})
-//   Line  10    -> blank separator
-//   Lines 11–20 -> Z's template  (template[1][row][col] ∈ {0,1})
-//
-// A '1' in the template means the cell belongs to the "relational"
-// (symbol 0–3) partition; '0' means the "non-relational" (4–9) partition.
+// Template loading from binary file
 // ---------------------------------------------------------------
-void unloadTemplate(const string& path) {
-	ifstream f(path);
-	if (!f.is_open()) {
-		cerr << "Cannot open template file: " << path << "\n";
-		return;
-	}
-	string line;
-	int line_no = 0;
-	while (getline(f, line)) {
-		while (!line.empty() && (line.back() == '\r' || line.back() == '\n' || line.back() == ' ')) // Strip trailing whitespace / CR
-			line.pop_back();
+#include <fstream>
+#include <vector>
+#include <iostream>
+#include <cstdint>
 
-		if (!line.empty()) {
-			if (line_no <= 9) {
-				tmpl[0].push_back({});
-				for (char ch : line)
-					tmpl[0].back().push_back(ch - '0');
-			} else if (line_no > 10 && line_no <= 20) {
-				tmpl[1].push_back({});
-				for (char ch : line)
-					tmpl[1].back().push_back(ch - '0');
-			}
-		}
-		++line_no;
-	}
+std::vector<std::vector<std::vector<int>>> read_template_from_binary(const std::string& binary_path, const int template_id) {
+    // Result: 2 squares, each 10 rows of 10 ints
+    std::vector<std::vector<std::vector<int>>> tmpl(2, std::vector<std::vector<int>>(10, std::vector<int>(10, 0)));
+
+    std::ifstream in(binary_path, std::ios::binary);
+    if (!in) {
+        std::cerr << "Cannot open binary file: " << binary_path << "\n";
+        return tmpl;   // empty template
+    }
+
+    // Each template occupies exactly 25 bytes
+    constexpr std::streamoff block_size = 25;
+    in.seekg(template_id * block_size);
+    if (!in) {
+        std::cerr << "Invalid template ID or seek error\n";
+        return tmpl;
+    }
+
+    unsigned char buffer[block_size];
+    in.read(reinterpret_cast<char*>(buffer), block_size);
+    if (in.gcount() != block_size) {
+        std::cerr << "Could not read full template block\n";
+        return tmpl;
+    }
+
+    // Unpack bits in the same order they were written:
+    // square 0 rows 0..9 cols 0..9, then square 1 rows 0..9 cols 0..9
+    int bit_index = 0;
+    for (int sq = 0; sq < 2; ++sq)
+        for (int row = 0; row < 10; ++row)
+            for (int col = 0; col < 10; ++col) {
+                int byte_idx = bit_index / 8;
+                int bit_pos  = bit_index % 8;
+                int val = (buffer[byte_idx] >> bit_pos) & 1;
+                tmpl[sq][row][col] = val;
+                ++bit_index;
+            }
+
+    return tmpl;
 }
 
 // ---------------------------------------------------------------
@@ -652,7 +663,7 @@ long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int
 // ---------------------------------------------------------------
 // Runs the entire encoding process from creating the solver to generating to cubes, then finishing by solving them all.
 // ---------------------------------------------------------------
-long long runEncoding(const string& template_path, int template_id, int observed_syms_A, bool can_forget) {
+long long runEncoding(int template_id, int observed_syms_A, bool can_forget) {
 	auto timer = chrono::steady_clock::now();
 	cout << "Running Encoding:\n";
 
@@ -731,7 +742,7 @@ int main(int argc, char* argv[]) {
 	// TODO: read in the template as a binary file, 200 bits each template (100 per square)
 	// first i need to edit my template finding code to output in a single binary file
 
-	int template_id     = atoi(argv[1]) + 1; 
+	int template_id     = atoi(argv[1]); 
 	int observed_syms_A = 10;
 	if (argc > 2)
 		CUBE_R_PARAM = atoi(argv[2]);
@@ -743,7 +754,6 @@ int main(int argc, char* argv[]) {
 		CUBE_LIMIT = atoi(argv[5]);
 
 	string parent_dir    = "../";
-	string template_path = parent_dir + "refinements and candidate lines/templates/" + to_string(template_id) + "-template.txt";
 
 	// TODO: On the cluster, use the full absolute path, e.g.: g_march_cu_path = string(getenv("HOME")) + "/CnC-master/march_cu";
 	string march_cu_dir  = "../CnC-master/march_cu";
@@ -755,7 +765,7 @@ int main(int argc, char* argv[]) {
 	cout << "== Assumption Model, each cube are turned into assumptions into a single shared solver, learned clauses transfer over. ==\n";
 #endif
 
-	cout << "=== Finding all partial solutions for template " << (template_id - 1) << " ===\n";
+	cout << "=== Finding all partial solutions for template " << template_id << " ===\n";
 	cout << "observed_syms_A        : " << observed_syms_A        << "\n";
 	cout << "r_parameter            : " << CUBE_R_PARAM << "\n";
 	cout << "starting from cube     : " << CUBE_START << "\n";
@@ -778,8 +788,9 @@ int main(int argc, char* argv[]) {
 		return 1;
 	}
 	
-	cout << "	Loading template from: " << template_path << "\n";
-	unloadTemplate(template_path);
+	std::string binary_file = "templates.bin";
+	cout << "	Loading template from: " << binary_file << "\n";
+    auto tmpl = read_template_from_binary(binary_file, template_id);
 	if (tmpl[0].empty() || tmpl[1].empty()) {
 		cerr << "Failed to load a valid template.\n";
 		return -1;
@@ -787,9 +798,9 @@ int main(int argc, char* argv[]) {
 
 	setup(tmpl);
 
-	long long sol_count = runEncoding(template_path, template_id, observed_syms_A, CANFORGET);
+	long long sol_count = runEncoding(template_id, observed_syms_A, CANFORGET);
 
-	cout << "\n=== FINAL RESULTS FOR TEMPLATE " << (template_id - 1) << " ===\n";
+	cout << "\n=== FINAL RESULTS FOR TEMPLATE " << template_id << " ===\n";
 	cout << "Total partial solutions found: " << sol_count << "\n";
 	cout << "Total refinements found: " << get_refinement_count() << "\n";
 	cout << "Total early blocking attempts: " << early_blocks << "/" << early_blocks_total << "\n";
