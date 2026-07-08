@@ -67,39 +67,6 @@ int CUBE_START = 0; // The cube to start solving from
 int SAT_SEED = 0; // Seed of the Cubes, <= -1 adds no seed
 string JOB_ID = ""; // Job_id used for repeated calls to the same template
 
-struct LogRedirect {
-	std::ofstream file;
-	std::streambuf* orig_cout_buf = nullptr;
-	bool active = false;
-
-	void open(const std::string& path) {
-		file.open(path, std::ios::out | std::ios::trunc);
-		if (!file.is_open() || !file) {
-			std::cerr << "Warning: could not open log file '" << path << "' for writing; continuing to log to stdout.\n";
-			return;
-		}
-		orig_cout_buf = std::cout.rdbuf(file.rdbuf());
-		active = true;
-		std::cerr << "Logging cout output to: " << path << "\n";
-	}
-
-	void close() {
-		if (!active) return;
-		std::cout.flush();
-		std::cout.rdbuf(orig_cout_buf);
-		orig_cout_buf = nullptr;
-		if (file.is_open()) {
-			file.flush();
-			file.close();
-		}
-		active = false;
-	}
-
-	~LogRedirect() { close(); }
-};
-
-LogRedirect g_log;
-
 #include "partial_solution_refinement.cpp"
 
 static void handle_sigterm(int) {
@@ -108,7 +75,6 @@ static void handle_sigterm(int) {
     std::cout.flush();     // flush C++ streams too
     std::cerr.flush();
 	flush_output();
-	g_log.close();
     std::_Exit(0);         // hard exit -- skips destructors which could hang
 }
 
@@ -798,7 +764,8 @@ int main(int argc, char* argv[]) {
 	if (argc > 6) SAT_SEED 		= atoi(argv[6]);
 	if (argc > 7) CUBE_LIMIT 	= atoi(argv[7]);
 	
-	g_log.open(output_path + "/refinements_" + JOB_ID + ".log"); // Redirect all cout output into a log file instead of the terminal
+	freopen((output_path + "/refinements_" + JOB_ID + ".log").c_str(), "w", stdout);
+	freopen((output_path + "/refinements_" + JOB_ID + ".log").c_str(), "a", stderr); // Redirect all cout output into a log file instead of the terminal
 
 	string project_dir	= string(getenv("HOME")) + "/projects/def-stevens/mo13";
 	g_march_cu_path		= project_dir + "/CnC/march_cu/march_cu";
