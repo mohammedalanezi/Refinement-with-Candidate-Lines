@@ -730,7 +730,7 @@ int main() {
 	print_avg("Isomorphism   		", total_isomorphism, count_isomorphism);
 	print_avg("Certificate creation	", total_cert_creation, count_cert_creation);
 	print_avg("File write    		", total_file_write, count_file_write);
-	print_avg("SAT Solve    		:", elapsed - (total_template_build + total_graph_build + total_isomorphism + total_cert_creation + total_file_write), solutions);
+	print_avg("SAT Solver    		", elapsed - (total_template_build + total_graph_build + total_isomorphism + total_cert_creation + total_file_write), solutions);
 	std::cout << "\nTotal elapsed: " << elapsed.count() << " seconds\n";
 
 	return 0;

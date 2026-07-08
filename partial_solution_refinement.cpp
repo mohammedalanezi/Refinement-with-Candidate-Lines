@@ -12,6 +12,10 @@
 #define TRACK_TIME 1
 #endif
 
+#ifndef WRITE_REFINEMENTS
+#define WRITE_REFINEMENTS 0
+#endif
+
 using namespace std;
 
 // Global data structures
@@ -39,6 +43,9 @@ __uint128_t all_points_mask; // bit (p-1) set means point p is on this line (poi
 
 vector<__uint128_t> cand_masks_A; 
 vector<__uint128_t> cand_masks_B;
+
+string output_path;
+std::ofstream outfile;
 
 static int* intersecting_B_buf = nullptr;
 
@@ -143,14 +150,50 @@ bool intersectsExactlyOnce(__uint128_t m1, __uint128_t m2) {
 	return c != 0 && (c & (c - 1)) == 0;
 }
 
+/**
+ * Writes a 100‑bit permutation mask as 5 bytes to a binary output stream.
+ * The mask must have exactly one set bit per row and per column.
+ */
+void write_compact_line(std::ofstream &out, __uint128_t mask) {
+	uint8_t buf[5] = {0}; // zero-initialise, we will fill nibbles
+
+	for (int row = 0; row < 10; ++row) {
+		uint16_t row_bits = (mask >> (row * 10)) & 0x3FF; // Extract the 10 bits of this row
+		int col = __builtin_ctz(row_bits); // Since the mask is a valid permutation, exactly one bit is set
+
+		int byte_idx = row / 2;
+		if (row % 2 == 0)
+			buf[byte_idx] = col;		 // low nibble
+		else
+			buf[byte_idx] |= (col << 4); // high nibble
+	}
+
+	out.write(reinterpret_cast<const char*>(buf), 5);
+}
+
+/**
+ * Writes a single 0xFF byte as a block separator.
+ */
+void write_separator(std::ofstream &out) {
+	uint8_t sep = 0xFF;
+	out.write(reinterpret_cast<const char*>(&sep), 1);
+}
+
+/**
+ * Flush the output file.
+ */
+void flush_output() {
+	outfile.flush();
+}
+
 struct CandidatePolicy { 
 	mutable int is_A = false;
 	explicit operator bool() const { return true; }
 	bool operator()(const std::vector<int>& solution) const {
 		if(is_A)
-        	cand_masks_A.push_back(make_mask(solution));
+			cand_masks_A.push_back(make_mask(solution));
 		else
-        	cand_masks_B.push_back(make_mask(solution));
+			cand_masks_B.push_back(make_mask(solution));
 		return true;
 	}
 	static constexpr bool notifyAssignment = false;
@@ -159,71 +202,71 @@ struct CandidatePolicy {
 };
 
 static void addCardinalityClauses(CaDiCaL::Solver &solver, const std::vector<int> &var_list, int min_val, int max_val, int &var_cnt) {
-    int n = (int)var_list.size();
-    int k = max_val + 1;   // at most max_val  -> forbid j == k
-    int l = min_val;       // at least min_val -> enforce j == l for i=n
+	int n = (int)var_list.size();
+	int k = max_val + 1;   // at most max_val  -> forbid j == k
+	int l = min_val;       // at least min_val -> enforce j == l for i=n
 
-    // Allocate auxiliary variables s[i][j] (0 <= i <= n, 0 <= j <= k)
-    int num_aux = (n + 1) * (k + 1);
-    int need_max = var_cnt + num_aux;
-    solver.resize(need_max);          // ensure the solver knows these variables
+	// Allocate auxiliary variables s[i][j] (0 <= i <= n, 0 <= j <= k)
+	int num_aux = (n + 1) * (k + 1);
+	int need_max = var_cnt + num_aux;
+	solver.resize(need_max);          // ensure the solver knows these variables
 
-    std::vector<std::vector<int>> s(n + 1, std::vector<int>(k + 1));
-    for (int i = 0; i <= n; ++i)
-        for (int j = 0; j <= k; ++j)
-            s[i][j] = ++var_cnt;       // assign new variable
+	std::vector<std::vector<int>> s(n + 1, std::vector<int>(k + 1));
+	for (int i = 0; i <= n; ++i)
+		for (int j = 0; j <= k; ++j)
+			s[i][j] = ++var_cnt;       // assign new variable
 
-    // 1) "0 variables are always true of variables x1..xi"
-    for (int i = 0; i <= n; ++i) {
-        solver.add(s[i][0]);
-        solver.add(0);
-    }
+	// 1) "0 variables are always true of variables x1..xi"
+	for (int i = 0; i <= n; ++i) {
+		solver.add(s[i][0]);
+		solver.add(0);
+	}
 
-    // 2) "j >= 1 of nothing is always false"
-    for (int j = 1; j <= k; ++j) {
-        solver.add(-s[0][j]);
-        solver.add(0);
-    }
+	// 2) "j >= 1 of nothing is always false"
+	for (int j = 1; j <= k; ++j) {
+		solver.add(-s[0][j]);
+		solver.add(0);
+	}
 
-    // 3) Lower bound: at least min_val of all n variables must be true
-    for (int j = 1; j <= l; ++j) {
-        solver.add(s[n][j]);
-        solver.add(0);
-    }
+	// 3) Lower bound: at least min_val of all n variables must be true
+	for (int j = 1; j <= l; ++j) {
+		solver.add(s[n][j]);
+		solver.add(0);
+	}
 
-    // 4) Upper bound: at most max_val -> never allow k = max_val+1 true
-    for (int i = 1; i <= n; ++i) {
-        solver.add(-s[i][k]);
-        solver.add(0);
-    }
+	// 4) Upper bound: at most max_val -> never allow k = max_val+1 true
+	for (int i = 1; i <= n; ++i) {
+		solver.add(-s[i][k]);
+		solver.add(0);
+	}
 
-    // 5) Propagation clauses
-    for (int i = 1; i <= n; ++i)
-        for (int j = 1; j <= k; ++j) {
-            // s[i-1][j]  ->  s[i][j]
-            solver.add(-s[i-1][j]);
-            solver.add(s[i][j]);
-            solver.add(0);
+	// 5) Propagation clauses
+	for (int i = 1; i <= n; ++i)
+		for (int j = 1; j <= k; ++j) {
+			// s[i-1][j]  ->  s[i][j]
+			solver.add(-s[i-1][j]);
+			solver.add(s[i][j]);
+			solver.add(0);
 
-            // x_i ∧ s[i-1][j-1]  ->  s[i][j]
-            solver.add(-var_list[i-1]);
-            solver.add(-s[i-1][j-1]);
-            solver.add(s[i][j]);
-            solver.add(0);
+			// x_i ∧ s[i-1][j-1]  ->  s[i][j]
+			solver.add(-var_list[i-1]);
+			solver.add(-s[i-1][j-1]);
+			solver.add(s[i][j]);
+			solver.add(0);
 
-            if (j <= l) {
-                // s[i][j]  ->  s[i-1][j] ∨ x_i
-                solver.add(-s[i][j]);
-                solver.add(s[i-1][j]);
-                solver.add(var_list[i-1]);
-                solver.add(0);
+			if (j <= l) {
+				// s[i][j]  ->  s[i-1][j] ∨ x_i
+				solver.add(-s[i][j]);
+				solver.add(s[i-1][j]);
+				solver.add(var_list[i-1]);
+				solver.add(0);
 
-                // s[i][j]  ->  s[i-1][j-1]
-                solver.add(-s[i][j]);
-                solver.add(s[i-1][j-1]);
-                solver.add(0);
-            }
-        }
+				// s[i][j]  ->  s[i-1][j-1]
+				solver.add(-s[i][j]);
+				solver.add(s[i-1][j-1]);
+				solver.add(0);
+			}
+		}
 }
 
 static int getTemplateBit(const vector<vector<vector<int>>> tmpl, int r, int c, int bit) {
@@ -507,109 +550,150 @@ void getIntersectingBCovering(const int opposite_indices[], __uint128_t& union_m
  * @param chosen    Number of lines selected so far on the current path.
  * @param suffix    Precomputed array where `suffix[i]` is the bitwise OR of the masks of all candidates from index `i` to `B_count-1`.
  *                  `suffix` must have length at least `B_count + 1`, with `suffix[B_count] == 0`.
- * @returns The number of distinct subsets of the given candidate lines that are
- *          pairwise disjoint and whose union equals the full set of 100 points (`all_points_mask`).
+ * @param path      Scratch buffer (length >= order) holding the `cand_masks_B` indices chosen so far on this path.
+ * @param found     Output: one entry is appended (a copy of `path[0..order-1]`) for every complete exact cover discovered.
+ *                  Only touched on successful leaves, so it adds no overhead to the pruning/branching hot path.
  */
-static int count_exact_covers(const int B_indices[], int B_count,
-                              __uint128_t covered, int idx, int chosen,
-                              const __uint128_t suffix[]) {
-    if (covered == all_points_mask) return 1;
-    if (idx >= B_count) return 0;
+static void count_exact_covers(const int B_indices[], int B_count,
+							  __uint128_t covered, int idx, int chosen,
+							  const __uint128_t suffix[],
+							  int path[], vector<array<int, order>>& found) {
+	if (covered == all_points_mask) {
+		array<int, order> cover;
+		for (int i = 0; i < order; ++i) cover[i] = path[i];
+		found.push_back(cover);
+		return;
+	}
+	if (idx >= B_count) return;
 
-    // Prune 1: remaining lines cannot cover all points
-    if ((covered | suffix[idx]) != all_points_mask) return 0;
+	// Prune 1: remaining lines cannot cover all points
+	if ((covered | suffix[idx]) != all_points_mask) return;
 
-    // Prune 2: not enough lines left to reach 10
-    if (chosen + (B_count - idx) < 10) return 0;
+	// Prune 2: not enough lines left to reach 10
+	if (chosen + (B_count - idx) < 10) return;
 
-    int count = 0;
+	// Option 1: skip line idx
+	count_exact_covers(B_indices, B_count, covered, idx + 1, chosen, suffix, path, found);
 
-    // Option 1: skip line idx
-    count += count_exact_covers(B_indices, B_count, covered, idx + 1, chosen, suffix);
-
-    // Option 2: include line idx if it doesn't overlap
-    __uint128_t m = cand_masks_B[B_indices[idx]];
-    if ((m & covered) == 0)
-        count += count_exact_covers(B_indices, B_count, covered | m, idx + 1, chosen + 1, suffix);
-
-    return count;
+	// Option 2: include line idx if it doesn't overlap
+	__uint128_t m = cand_masks_B[B_indices[idx]];
+	if ((m & covered) == 0) {
+		path[chosen] = B_indices[idx];
+		count_exact_covers(B_indices, B_count, covered | m, idx + 1, chosen + 1, suffix, path, found);
+	}
 }
 
-int get_refinements(const int B_indices[], const int& B_count, const __uint128_t union_B) {
+int get_refinements(const int B_indices[], const int& B_count, const __uint128_t union_B, vector<array<int, order>>& found) {
 #if TRACK_TIME == 1
-    auto timer = chrono::steady_clock::now();
+	auto timer = chrono::steady_clock::now();
 #endif
-    if (union_B != all_points_mask) {
-        #if TRACK_TIME == 1
-        total_refinement_early_blocking += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
-        #endif
-        return -1;
-    }
+	if (union_B != all_points_mask) {
+		#if TRACK_TIME == 1
+		total_refinement_early_blocking += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
+		#endif
+		return -1;
+	}
 
-    if (B_count == order) return 1;
+	if (B_count == order) {
+		// Exactly `order` candidates and their union already covers every point (checked above),
+		// so they must be pairwise disjoint -- this is the one and only refinement.
+		array<int, order> cover;
+		for (int i = 0; i < order; ++i) cover[i] = B_indices[i];
+		found.push_back(cover);
+		return 1;
+	}
 
 	__uint128_t suffix[B_count + 1];
 	suffix[B_count] = 0;
 	for (int i = B_count - 1; i >= 0; --i)
 		suffix[i] = suffix[i + 1] | cand_masks_B[B_indices[i]];
 
-	int sol_count = count_exact_covers(B_indices, B_count, 0, 0, 0, suffix);
+	int path[order];
+	count_exact_covers(B_indices, B_count, 0, 0, 0, suffix, path, found);
+	int sol_count = (int)found.size();
 
 #if TRACK_TIME == 1
-    total_refinement_solve_time += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
+	total_refinement_solve_time += chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 #endif
 
-    return sol_count;
+	return sol_count;
 }
 
-int processLine(const int sym_A_idx[order]) {
-    ++partial_count;
+int processLine(const int sym_A_idx[order], vector<array<int, order>>& found) {
+	++partial_count;
 
-    #if TRACK_TIME == 1
-    auto intersection_time = chrono::steady_clock::now();
-    #endif
-    int intersection_B_count = 0;
-    __uint128_t union_B = 0;
-    getIntersectingBLineIndices(intersecting_B_buf, intersection_B_count, sym_A_idx, union_B);
-    #if TRACK_TIME == 1
-    total_line_intersection_time += chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
-    #endif
+	#if TRACK_TIME == 1
+	auto intersection_time = chrono::steady_clock::now();
+	#endif
+	int intersection_B_count = 0;
+	__uint128_t union_B = 0;
+	getIntersectingBLineIndices(intersecting_B_buf, intersection_B_count, sym_A_idx, union_B);
+	#if TRACK_TIME == 1
+	total_line_intersection_time += chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
+	#endif
 
-    if (intersection_B_count < order)
-        return -1;
+	if (intersection_B_count < order)
+		return -1;
 
-    return get_refinements(intersecting_B_buf, intersection_B_count, union_B);
+	return get_refinements(intersecting_B_buf, intersection_B_count, union_B, found);
 }
 
 bool check_partial_solution_covering(const int sym_A_idx[order], __uint128_t& union_B) {
-    #if TRACK_TIME == 1
-    auto intersection_time = chrono::steady_clock::now();
-    #endif
+	#if TRACK_TIME == 1
+	auto intersection_time = chrono::steady_clock::now();
+	#endif
 
-    getIntersectingBCovering(sym_A_idx, union_B);
+	getIntersectingBCovering(sym_A_idx, union_B);
 
-    #if TRACK_TIME == 1
-    double elapsed_3 = chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
-    total_line_covering_time += elapsed_3;
-    #endif
+	#if TRACK_TIME == 1
+	double elapsed_3 = chrono::duration<double>(chrono::steady_clock::now() - intersection_time).count();
+	total_line_covering_time += elapsed_3;
+	#endif
 
-    return union_B == all_points_mask;
+	return union_B == all_points_mask;
 }
 
 bool solve_partial_solution(const int sym_A_idx[order]) {
-    long int refinement_count = processLine(sym_A_idx);
-    if (refinement_count > 0) {
-        total_refinements += refinement_count;
-        return false;
-    } else if (refinement_count < 0)
-        skipped_partial_solutions += 1;
-    return true;
+	static thread_local vector<array<int, order>> found_B_refinements;
+	found_B_refinements.clear();
+
+	long int refinement_count = processLine(sym_A_idx, found_B_refinements);
+	if (refinement_count > 0) {
+		total_refinements += refinement_count;
+#if WRITE_REFINEMENTS == 1
+		write_separator(outfile);
+		// Write all 10 A lines compactly
+		for (int i = 0; i < order; ++i)
+			write_compact_line(outfile, cand_masks_A[sym_A_idx[i]]);
+
+		// Write every B-cover (10 lines each)
+		for (const auto& cover : found_B_refinements)
+			for (int i = 0; i < order; ++i)
+				write_compact_line(outfile, cand_masks_B[cover[i]]);
+#endif
+		return false;
+	} else if (refinement_count < 0)
+		skipped_partial_solutions += 1;
+	return true;
 }
 
 long int get_refinement_count() { return total_refinements; }
 long int get_skipped_count()    { return skipped_partial_solutions; }
 
-int setup(const vector<vector<vector<int>>> tmpl) {
+int setup(const vector<vector<vector<int>>> tmpl, string path, string ID) {
+	output_path = path;
+#if WRITE_REFINEMENTS == 1
+	outfile.exceptions(std::ios::failbit | std::ios::badbit);
+    outfile.open(output_path + "/solutions_" + ID + ".bin", std::ios::binary | std::ios::out);
+    if (!outfile) {
+        std::cerr << "Cannot open 'solutions_" + ID + ".bin' for writing\n";
+        return 1;
+    }
+#endif
+
+	ios::sync_with_stdio(false);
+	cin.tie(nullptr);
+
 	cout << "	Finding candidate lines from template..." << endl;
 	find_candidate_lines(tmpl, true);
 	find_candidate_lines(tmpl, false);
@@ -631,6 +715,8 @@ void print_substep_timings_log(double creation_time,
 		double total_minimize_setup, double total_minimize_remove,
 		double total_cube_gen_time, double total_cube_creation_time, double total_cube_solve_time) {
 	double elapsed = chrono::duration<double>(chrono::steady_clock::now() - start_time).count(); 
+
+    outfile.close();
 
 	cout << "\n======= SUBSTEP DEFINITION  =======\n";
 	cout << "When a partial solution is found in the SAT instance, we attempt to refine it into all its possible full solutions.\n";
@@ -655,8 +741,8 @@ void print_substep_timings_log(double creation_time,
 	double sat_internal = total_cube_solve_time - (minimize_total + substep_total);
 	double cubing_total = total_cube_gen_time + total_cube_creation_time + sat_internal;
 	
-    double accounted = creation_time + cubing_total + substep_total + post_processing;
-    double other = elapsed - accounted;
+	double accounted = creation_time + cubing_total + substep_total + post_processing;
+	double other = elapsed - accounted;
 
 	cout << "\n=== WALL TIMINGS ===\n";
 	cout << "   Cube (SAT -> Solving + Early -> Minimize) -> Substep (INPUT -> FILTER -> REFINEMENT)\n";

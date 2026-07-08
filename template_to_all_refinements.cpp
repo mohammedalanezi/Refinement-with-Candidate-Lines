@@ -6,6 +6,9 @@
 #include <chrono>
 #include <cstdlib>
 #include <algorithm>
+#include <cstdint>
+#include <csignal>
+#include <cstdio>
 
 #include "cadical.hpp"
 #include "exhaustive.hpp"
@@ -14,6 +17,8 @@
 #define FULL_DUMP 0 // if we dump irredundant clauses/unit clauses to march_cu
 #define MAX_CUBES 0 // maximum cubes we process, infinite when <=0, this is for early termination
 #define TRACK_TIME 1 // Track timings, GLOBAL WALL TIME ALWAYS TRACKED
+
+#define WRITE_REFINEMENTS 1 // If we write out the binary refinement file or not
 
 #define CANEARLY 1 // 1 is fastest
 #define MINIMIZE 0 // 0 is fastest
@@ -60,8 +65,52 @@ int CUBE_LIMIT = 0; // Max number of cubes that will be solved
 int CUBE_START = 0; // The cube to start solving from
 
 int SAT_SEED = 0; // Seed of the Cubes, <= -1 adds no seed
+string JOB_ID = ""; // Job_id used for repeated calls to the same template
+
+struct LogRedirect {
+	std::ofstream file;
+	std::streambuf* orig_cout_buf = nullptr;
+	bool active = false;
+
+	void open(const std::string& path) {
+		file.open(path, std::ios::out | std::ios::trunc);
+		if (!file.is_open() || !file) {
+			std::cerr << "Warning: could not open log file '" << path << "' for writing; continuing to log to stdout.\n";
+			return;
+		}
+		orig_cout_buf = std::cout.rdbuf(file.rdbuf());
+		active = true;
+		std::cerr << "Logging cout output to: " << path << "\n";
+	}
+
+	void close() {
+		if (!active) return;
+		std::cout.flush();
+		std::cout.rdbuf(orig_cout_buf);
+		orig_cout_buf = nullptr;
+		if (file.is_open()) {
+			file.flush();
+			file.close();
+		}
+		active = false;
+	}
+
+	~LogRedirect() { close(); }
+};
+
+LogRedirect g_log;
 
 #include "partial_solution_refinement.cpp"
+
+static void handle_sigterm(int) {
+    std::fflush(stdout);   // flush C-style stdout (printf, etc.)
+    std::fflush(stderr);
+    std::cout.flush();     // flush C++ streams too
+    std::cerr.flush();
+	flush_output();
+	g_log.close();
+    std::_Exit(0);         // hard exit -- skips destructors which could hang
+}
 
 // ---------------------------------------------------------------
 // Variable layout
@@ -81,10 +130,6 @@ inline int var(int sq, int r, int c, int s) {
 // ---------------------------------------------------------------
 // Template loading from binary file
 // ---------------------------------------------------------------
-#include <fstream>
-#include <vector>
-#include <iostream>
-#include <cstdint>
 
 std::vector<std::vector<std::vector<int>>> read_template_from_binary(const std::string& binary_path, const int template_id) {
     // Result: 2 squares, each 10 rows of 10 ints
@@ -521,8 +566,8 @@ vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const
 	auto t0 = chrono::steady_clock::now();
 #endif
 
-	string cnf_path   = parent_dir + "tmp_t" + to_string(template_id) + ".cnf";
-	string cubes_path = parent_dir + "tmp_t" + to_string(template_id) + "_cubes.icnf";
+	string cnf_path   = parent_dir + "/tmp" + to_string(template_id) + ".cnf";
+	string cubes_path = parent_dir + "/tmp" + to_string(template_id) + "_cubes.icnf";
 
 	// Step 1: build a temporary solver just to dump the DIMACS file
 	cout << "  Writing CNF to: " << cnf_path << "\n";
@@ -673,8 +718,7 @@ long long runEncoding(int template_id, int observed_syms_A, bool can_forget) {
 	cout << ")\n";
 
 	// --- Cubing phase ---
-	string parent_dir = "./";
-	vector<vector<int>> cubes = generateCubes(tmpl, parent_dir, template_id);
+	vector<vector<int>> cubes = generateCubes(tmpl, output_path, template_id);
 	if (cubes.empty()) {
 		cout << "No cubes generated (formula UNSAT during cubing or march_cu error).\n";
 		return 0;
@@ -718,8 +762,11 @@ long long runEncoding(int template_id, int observed_syms_A, bool can_forget) {
 	cout << "	Solving Cubes:" << endl;
 	for (int i = CUBE_START; i < cube_amount; ++i) {
 		total += solveOneCube(tmpl, cubes[i], i, propagator);
-		if(i % interval == 0)
+		if(i % interval == 0) {
 			cout << i+1 << "/" << cubes.size() << ": average solve: " << total_cube_solve_time/(i + 1) << "s, average create: " << total_cube_creation_time/(i + 1) << "s, ETA: " << cubes.size() * (total_cube_solve_time/(i + 1) + total_cube_creation_time/(i + 1)) << "s" << endl;
+			cout.flush(); // to ensure cluster updates encase of timeout
+			flush_output(); // ensure the refinements keep up
+		}
 	}
 
 	double total_elapsed = chrono::duration<double>(chrono::steady_clock::now() - wall_start).count();
@@ -734,30 +781,27 @@ long long runEncoding(int template_id, int observed_syms_A, bool can_forget) {
 // Main
 // ---------------------------------------------------------------
 int main(int argc, char* argv[]) {
-	if (argc < 2) {
-		cerr << "Usage: " << argv[0] << " <template_id> (# of free vars to remove) (starting cube) (seed) (maximum # of cubes)\n";
+	std::signal(SIGTERM, handle_sigterm);
+	std::signal(SIGINT,  handle_sigterm);
+
+	if (argc < 3) {
+		cerr << "Usage: " << argv[0] << " <output_directory> <template_id> (# of free vars to remove) (starting cube) (jobid) (seed) (maximum # of cubes)\n";
 		return 1;
 	}
 
-	// TODO: read in the template as a binary file, 200 bits each template (100 per square)
-	// first i need to edit my template finding code to output in a single binary file
-
-	int template_id     = atoi(argv[1]); 
+	string output_path 	= argv[1];
+	int template_id     = atoi(argv[2]); 
 	int observed_syms_A = 10;
-	if (argc > 2)
-		CUBE_R_PARAM = atoi(argv[2]);
-	if (argc > 3)
-		CUBE_START = atoi(argv[3]);
-	if (argc > 4)
-		SAT_SEED = atoi(argv[4]);
-	if (argc > 5)
-		CUBE_LIMIT = atoi(argv[5]);
+	if (argc > 3) CUBE_R_PARAM 	= atoi(argv[3]);
+	if (argc > 4) CUBE_START 	= atoi(argv[4]);
+	if (argc > 5) JOB_ID		= argv[5];
+	if (argc > 6) SAT_SEED 		= atoi(argv[6]);
+	if (argc > 7) CUBE_LIMIT 	= atoi(argv[7]);
+	
+	g_log.open(output_path + "/refinements_" + JOB_ID + ".log"); // Redirect all cout output into a log file instead of the terminal
 
-	string parent_dir    = "../";
-
-	// TODO: On the cluster, use the full absolute path, e.g.: g_march_cu_path = string(getenv("HOME")) + "/CnC-master/march_cu";
-	string march_cu_dir  = "../CnC-master/march_cu";
-	g_march_cu_path      = march_cu_dir + "/march_cu";
+	string project_dir	= string(getenv("HOME")) + "/projects/def-stevens/mo13";
+	g_march_cu_path		= project_dir + "/CnC/march_cu/march_cu";
 
 #if COPY_MODE == 1
 	cout << "== Copy Model, each cube are turned into literals into their own solver copied from a base solver, no learned clauses transfer over. ==\n";
@@ -788,15 +832,15 @@ int main(int argc, char* argv[]) {
 		return 1;
 	}
 	
-	std::string binary_file = "templates.bin";
+	std::string binary_file = project_dir + "/Refinement-with-Candidate-Lines/templates.bin";
 	cout << "	Loading template from: " << binary_file << "\n";
-    auto tmpl = read_template_from_binary(binary_file, template_id);
+    tmpl = read_template_from_binary(binary_file, template_id);
 	if (tmpl[0].empty() || tmpl[1].empty()) {
 		cerr << "Failed to load a valid template.\n";
 		return -1;
 	}
 
-	setup(tmpl);
+	setup(tmpl, output_path, JOB_ID);
 
 	long long sol_count = runEncoding(template_id, observed_syms_A, CANFORGET);
 
@@ -812,14 +856,3 @@ int main(int argc, char* argv[]) {
 
 	return 0;
 }
-
-/*
-TODO: figure out a way to print CPU times, all of these are WALL times (CaDiCaL::Terminator or expose solver->internal somehow? i think its private so id need to expose it again)
-
-TODO: *summary python script, takes in log Id and number of logs, the gets median, average and mode of the logs
-	A log is simply a txt file of the results
-
-TODO: run compute canada
-	A) need to be able to get all templates individually on compute canada
-	B) need to be able to refine templates into candidate lines individually on compute canada
-*/

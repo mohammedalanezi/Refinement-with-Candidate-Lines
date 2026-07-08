@@ -8,7 +8,7 @@ TARGET_TEMPLATE      = search_templates
 SRC_TEMPLATE         = $(TARGET_TEMPLATE).cpp
 
 # Include directories
-INCLUDES = -I../cadical-exhaust-master/src -I./nauty2_9_3 -I. 
+INCLUDES = -I../cadical-exhaust-master/src -I./nauty2_9_3 -I.
 
 # Greatest common flags
 CXXFLAGS_BASE = -std=c++20 -pipe $(INCLUDES)
@@ -18,7 +18,7 @@ LDFLAGS_BASE = ../cadical-exhaust-master/build/libcadical.a
 NAUTY_LIB = ./nauty2_9_3/nauty.a
 
 # ===== Release build (for benchmarking) =====
-CXXFLAGS_RELEASE = -O3 -march=native -DNDEBUG 
+CXXFLAGS_RELEASE = -O3 -march=native -DNDEBUG
 LDFLAGS_RELEASE  = -flto
 
 # ===== ASan build (for testing) =====
