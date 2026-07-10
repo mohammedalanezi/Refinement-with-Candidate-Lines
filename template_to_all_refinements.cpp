@@ -530,7 +530,7 @@ vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const
 	string cnf_path   = parent_dir + "/tmp" + to_string(TEMPLATE_ID) + ".cnf";
 	string cubes_path = parent_dir + "/tmp" + to_string(TEMPLATE_ID) + "_cubes.icnf";
 
-	if (CUBE_R_PARAM < 0) { // negative r values imply we have already created the cubes
+	if (CUBE_R_PARAM > 0) { // negative r values imply we have already created the cubes
 		{ // Step 1: build a temporary solver just to dump the DIMACS file
 			cout << "  Writing CNF to: " << cnf_path << "\n";
 			CaDiCaL::Solver dumper; // TODO: could copy instead?
