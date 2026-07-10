@@ -13,7 +13,6 @@
 #include "cadical.hpp"
 #include "exhaustive.hpp"
 
-#define COPY_MODE 1 // copy (1) faster than assumption mode (0) since we don't encounter clause poisoning, this is unknown for massively larger templates (e.g. 4) 
 #define FULL_DUMP 0 // if we dump irredundant clauses/unit clauses to march_cu
 #define MAX_CUBES 0 // maximum cubes we process, infinite when <=0, this is for early termination
 #define TRACK_TIME 1 // Track timings, GLOBAL WALL TIME ALWAYS TRACKED
@@ -64,18 +63,21 @@ int CUBE_R_PARAM = 20; // (when we rebuild a solver for each cube) 20 seems to b
 int CUBE_LIMIT = 0; // Max number of cubes that will be solved
 int CUBE_START = 0; // The cube to start solving from
 
+int TEMPLATE_ID = 0; // Current template we are solving
+int SOl_COUNT = 0; // Total number of partial solutions
 int SAT_SEED = 0; // Seed of the Cubes, <= -1 adds no seed
 string JOB_ID = ""; // Job_id used for repeated calls to the same template
 
 #include "partial_solution_refinement.cpp"
 
 static void handle_sigterm(int) {
-    std::fflush(stdout);   // flush C-style stdout (printf, etc.)
-    std::fflush(stderr);
-    std::cout.flush();     // flush C++ streams too
-    std::cerr.flush();
+	print_output(false);
+	std::fflush(stdout);   // flush C-style stdout (printf, etc.)
+	std::fflush(stderr);
+	std::cout.flush();     // flush C++ streams too
+	std::cerr.flush();
 	flush_output();
-    std::_Exit(0);         // hard exit -- skips destructors which could hang
+	std::_Exit(0);         // hard exit -- skips destructors which could hang
 }
 
 // ---------------------------------------------------------------
@@ -97,52 +99,51 @@ inline int var(int sq, int r, int c, int s) {
 // Template loading from binary file
 // ---------------------------------------------------------------
 
-std::vector<std::vector<std::vector<int>>> read_template_from_binary(const std::string& binary_path, const int template_id) {
-    // Result: 2 squares, each 10 rows of 10 ints
-    std::vector<std::vector<std::vector<int>>> tmpl(2, std::vector<std::vector<int>>(10, std::vector<int>(10, 0)));
+std::vector<std::vector<std::vector<int>>> read_template_from_binary(const std::string& binary_path) {
+	// Result: 2 squares, each 10 rows of 10 ints
+	std::vector<std::vector<std::vector<int>>> tmpl(2, std::vector<std::vector<int>>(10, std::vector<int>(10, 0)));
 
-    std::ifstream in(binary_path, std::ios::binary);
-    if (!in) {
-        std::cerr << "Cannot open binary file: " << binary_path << "\n";
-        return tmpl;   // empty template
-    }
+	std::ifstream in(binary_path, std::ios::binary);
+	if (!in) {
+		std::cerr << "Cannot open binary file: " << binary_path << "\n";
+		return tmpl;   // empty template
+	}
 
-    // Each template occupies exactly 25 bytes
-    constexpr std::streamoff block_size = 25;
-    in.seekg(template_id * block_size);
-    if (!in) {
-        std::cerr << "Invalid template ID or seek error\n";
-        return tmpl;
-    }
+	// Each template occupies exactly 25 bytes
+	constexpr std::streamoff block_size = 25;
+	in.seekg(TEMPLATE_ID * block_size);
+	if (!in) {
+		std::cerr << "Invalid template ID or seek error\n";
+		return tmpl;
+	}
 
-    unsigned char buffer[block_size];
-    in.read(reinterpret_cast<char*>(buffer), block_size);
-    if (in.gcount() != block_size) {
-        std::cerr << "Could not read full template block\n";
-        return tmpl;
-    }
+	unsigned char buffer[block_size];
+	in.read(reinterpret_cast<char*>(buffer), block_size);
+	if (in.gcount() != block_size) {
+		std::cerr << "Could not read full template block\n";
+		return tmpl;
+	}
 
-    // Unpack bits in the same order they were written:
-    // square 0 rows 0..9 cols 0..9, then square 1 rows 0..9 cols 0..9
-    int bit_index = 0;
-    for (int sq = 0; sq < 2; ++sq)
-        for (int row = 0; row < 10; ++row)
-            for (int col = 0; col < 10; ++col) {
-                int byte_idx = bit_index / 8;
-                int bit_pos  = bit_index % 8;
-                int val = (buffer[byte_idx] >> bit_pos) & 1;
-                tmpl[sq][row][col] = val;
-                ++bit_index;
-            }
+	// Unpack bits in the same order they were written:
+	// square 0 rows 0..9 cols 0..9, then square 1 rows 0..9 cols 0..9
+	int bit_index = 0;
+	for (int sq = 0; sq < 2; ++sq)
+		for (int row = 0; row < 10; ++row)
+			for (int col = 0; col < 10; ++col) {
+				int byte_idx = bit_index / 8;
+				int bit_pos  = bit_index % 8;
+				int val = (buffer[byte_idx] >> bit_pos) & 1;
+				tmpl[sq][row][col] = val;
+				++bit_index;
+			}
 
-    return tmpl;
+	return tmpl;
 }
 
 // ---------------------------------------------------------------
-// Latin-square encoding (mirrors encodeLatinSquareOld in helpers.py)
+// Latin-square encoding
 //
-// For every (x, y) pair three families of at-least-one clauses are added
-// together with all pairwise at-most-one (binary exclusion) clauses:
+// For every (x, y) pair three families of at-least-one clauses are added together with all pairwise at-most-one (binary exclusion) clauses:
 //
 //   clause1: cell (x,y) carries at least one symbol        -> {var(sq,x,y,z) | z}
 //   clause2: row x uses symbol y in at least one column    -> {var(sq,x,z,y) | z}
@@ -153,14 +154,14 @@ std::vector<std::vector<std::vector<int>>> read_template_from_binary(const std::
 //   AMO   col: -var(sq,z,x,y) ∨ -var(sq,w,x,y)  (z =/= w)
 // ---------------------------------------------------------------
 void encodeLatinSquare(CaDiCaL::Solver& solver, int sq) {
-    vector<int> clause1(order), clause2(order), clause3(order);
+	vector<int> clause1(order), clause2(order), clause3(order);
 
 	for (int x = 0; x < order; ++x) {
 		for (int y = 0; y < order; ++y) {
 			for (int z = 0; z < order; ++z) {
-                clause1[z] = var(sq, x, y, z); // cell (x,y) has symbol z
-                clause2[z] = var(sq, x, z, y); // row x, col z, symbol y
-                clause3[z] = var(sq, z, x, y); // row z, col x, symbol y
+				clause1[z] = var(sq, x, y, z); // cell (x,y) has symbol z
+				clause2[z] = var(sq, x, z, y); // row x, col z, symbol y
+				clause3[z] = var(sq, z, x, y); // row z, col x, symbol y
 
 				for (int w = z + 1; w < order; ++w) {
 					solver.clause({-var(sq, x, y, z), -var(sq, x, y, w)}); // AMO cell
@@ -176,12 +177,10 @@ void encodeLatinSquare(CaDiCaL::Solver& solver, int sq) {
 }
 
 // ---------------------------------------------------------------
-// Myrvold orthogonality encoding (mirrors encodeMyrvoldOrthogonality
-// in helpers.py)
+// Myrvold orthogonality encoding
 //
 // Uses the auxiliary square P (sq=2) to couple Q (sq=0) and Z (sq=1).
 // For every i, i', j, k:
-//
 //   p = P[i'][j][k]   z = Z[i][j][i']   q = Q[i][j][k]
 //
 //   (z ∧ p) -> q   <=>   -z ∨ -p ∨  q
@@ -332,28 +331,28 @@ struct FastPolicy {
 
 		// Stack-allocated prefix & suffix AND products
 		static const int words = rows_B; // number of 64‑bit words per A‑line
-        constexpr int MAX_ROWS_B = 256; // covers up to 16384 B-lines
+		constexpr int MAX_ROWS_B = 256; // covers up to 16384 B-lines
 		static const int last_word_bits = count_B % 64;
 		static const uint64_t last_word_mask = last_word_bits ? (1ULL << last_word_bits) - 1 : ~0ULL; // this is needed to ensure that suffix and prefix don't AND to have bits in "out-of-bounds" areas
-    	alignas(64) static thread_local uint64_t suffix[(order + 1) * MAX_ROWS_B];
+		alignas(64) static thread_local uint64_t suffix[(order + 1) * MAX_ROWS_B];
 		
-        // Build suffix products
-    	memset(suffix + n_active * words, 0xFF, words * sizeof(uint64_t));
+		// Build suffix products
+		memset(suffix + n_active * words, 0xFF, words * sizeof(uint64_t));
 		suffix[n_active * words + words - 1] = last_word_mask;
 		const uint64_t* next_row = intersects_once_BA + (long long)sym_A_idx[active_sym[n_active - 1]] * words;
 		__builtin_prefetch(next_row, 0, 3);
-        for (int i = n_active - 1; i >= 0; --i) {
-            const uint64_t* __restrict row = next_row;
+		for (int i = n_active - 1; i >= 0; --i) {
+			const uint64_t* __restrict row = next_row;
 			row_ptr[i] = row;
 			if (i - 1 >= 0) {
 				next_row = intersects_once_BA + (long long)sym_A_idx[active_sym[i-1]] * words;
 				__builtin_prefetch(next_row, 0, 3);
 			}
-            uint64_t*       __restrict dst = suffix + i * words;
-            const uint64_t* __restrict src = suffix + (i + 1) * words;
-            for (int w = 0; w < words; ++w)
-                dst[w] = src[w] & row[w];
-        }
+			uint64_t*       __restrict dst = suffix + i * words;
+			const uint64_t* __restrict src = suffix + (i + 1) * words;
+			for (int w = 0; w < words; ++w)
+				dst[w] = src[w] & row[w];
+		}
 			
 		// Running prefix and redundancy check 
 		alignas(64) static thread_local uint64_t running_prefix[MAX_ROWS_B];
@@ -368,7 +367,7 @@ struct FastPolicy {
 		constexpr int cutoff = 3;
 		int number_removed = 0;
 
-        // Check each symbol for redundancy (can the remaining symbols still cover?)
+		// Check each symbol for redundancy (can the remaining symbols still cover?)
 		for (int i = 0; i < n_active; ++i) {
 			int s = active_sym[i];
 			const uint64_t* right = suffix + (i + 1) * words;
@@ -403,10 +402,10 @@ struct FastPolicy {
 			}
 		}
 
-        // Rebuild clause from surviving marks
-        int out = 0;
-        for (int lit : clause) if (in_clause[-lit]) { clause[out++] = lit; in_clause[-lit] = false; }
-        clause.resize(out);
+		// Rebuild clause from surviving marks
+		int out = 0;
+		for (int lit : clause) if (in_clause[-lit]) { clause[out++] = lit; in_clause[-lit] = false; }
+		clause.resize(out);
 
 	#if TRACK_TIME
 		double remove_time = chrono::duration<double>(chrono::steady_clock::now() - t_start).count() - setup_time;
@@ -524,68 +523,59 @@ static vector<vector<int>> parseCubesFile(const string& path) { // Parses an .ic
 //        -m Q_MAX_VAR      (only branch on square Q's variables, i.e. vars 1-1000, so every cube fixes a distinct partial assignment of Q
 //                           and refinement sees no duplicate work across cubes)
 //   3. Parsing the resulting .icnf file
-//
-// Temp files are written alongside the template in parent_dir and are
-// named by template_id so parallel array jobs don't collide.
-vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const string& parent_dir, int template_id) {
+vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const string& parent_dir) {
 #if TRACK_TIME
 	auto t0 = chrono::steady_clock::now();
 #endif
+	string cnf_path   = parent_dir + "/tmp" + to_string(TEMPLATE_ID) + ".cnf";
+	string cubes_path = parent_dir + "/tmp" + to_string(TEMPLATE_ID) + "_cubes.icnf";
 
-	string cnf_path   = parent_dir + "/tmp" + to_string(template_id) + ".cnf";
-	string cubes_path = parent_dir + "/tmp" + to_string(template_id) + "_cubes.icnf";
+	if (CUBE_R_PARAM < 0) { // negative r values imply we have already created the cubes
+		{ // Step 1: build a temporary solver just to dump the DIMACS file
+			cout << "  Writing CNF to: " << cnf_path << "\n";
+			CaDiCaL::Solver dumper; // TODO: could copy instead?
+			dumper.set("inprocessing", 0);
+			dumper.set("factor",       0);
+			buildFormula(dumper, tmpl);
+#if FULL_DUMP == 1
+			int stdout_save = dup(fileno(stdout));
+			freopen(cnf_path.c_str(), "w", stdout);
+			dumper.dump_cnf();
+			fflush(stdout);
+			dup2(stdout_save, fileno(stdout));
+			close(stdout_save);
+#else
+			dumper.write_dimacs(cnf_path.c_str());
+#endif
+		}
 
-	// Step 1: build a temporary solver just to dump the DIMACS file
-	cout << "  Writing CNF to: " << cnf_path << "\n";
-	{
-		CaDiCaL::Solver dumper; // TODO: could copy instead?
-		dumper.set("inprocessing", 0);
-		dumper.set("factor",       0);
-		buildFormula(dumper, tmpl);
-	#if FULL_DUMP == 1
-		int stdout_save = dup(fileno(stdout));
-		freopen(cnf_path.c_str(), "w", stdout);
-		dumper.dump_cnf();
-		fflush(stdout);
-		dup2(stdout_save, fileno(stdout));
-		close(stdout_save);
-	#else
-		dumper.write_dimacs(cnf_path.c_str());
-	#endif
+		// Step 2: shell out to march_cu
+		//   -r CUBE_R_PARAM : stop after removing this many free variables
+		//   -m Q_MAX_VAR    : only branch on vars <= 1000 (square Q)
+		//   -l CUBE_LIMIT 	 : combine cubes up to a maximum amount
+		//   -o cubes_path   : write cubes here
+		ostringstream cmd;
+		cmd << g_march_cu_path << " " << cnf_path << " -r " << CUBE_R_PARAM << " -m " << Q_MAX_VAR;
+		if (CUBE_LIMIT > 0)
+			cmd << " -l " << CUBE_LIMIT;
+		cmd << " -o " << cubes_path;
+
+		cout << "  Running: " << cmd.str() << "\n";
+		int ret = system(cmd.str().c_str());
+#if TRACK_TIME
+		double elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
+#endif
+		if (ret != 0) {
+			cerr << "march_cu failed with exit code " << ret << "\n";
+			return {};
+		}
+#if TRACK_TIME
+		cout << "  Cubing time: " << elapsed << "s\n";
+		total_cube_gen_time = elapsed;
+#endif
 	}
 
-	// Step 2: shell out to march_cu
-	//   -r CUBE_R_PARAM : stop after removing this many free variables
-	//   -m Q_MAX_VAR    : only branch on vars <= 1000 (square Q)
-	//   -l CUBE_LIMIT 	 : combine cubes up to a maximum amount
-	//   -o cubes_path   : write cubes here
-	ostringstream cmd;
-	cmd << g_march_cu_path
-		<< " " << cnf_path
-		<< " -r " << CUBE_R_PARAM
-		<< " -m " << Q_MAX_VAR;
-	if (CUBE_LIMIT > 0)
-		cmd << " -l " << CUBE_LIMIT;
-	cmd << " -o " << cubes_path;
-
-	cout << "  Running: " << cmd.str() << "\n";
-
-	int ret = system(cmd.str().c_str());
-#if TRACK_TIME
-	double elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
-#endif
-
-	if (ret != 0) {
-		cerr << "march_cu failed with exit code " << ret << "\n";
-		return {};
-	}
-#if TRACK_TIME
-	cout << "  Cubing time: " << elapsed << "s\n";
-	total_cube_gen_time = elapsed;
-#endif
-
-	// Step 3: parse the .icnf output
-	auto cubes = parseCubesFile(cubes_path);
+	auto cubes = parseCubesFile(cubes_path); // Step 3: parse the .icnf output
 	cout << "  Cubes generated: " << cubes.size() << "\n";
 	cube_count = cubes.size();
 	return cubes;
@@ -594,42 +584,6 @@ vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const
 // ---------------------------------------------------------------
 // Solves a single cube: reuses central solver, adds cube as assumption literals, then runs the exhaustive enumeration.
 // ---------------------------------------------------------------
-#if COPY_MODE == 0
-long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int>& cube, const int& cube_index, ExhaustiveSearch<FastPolicy>& propagator) {
-#if TRACK_TIME
-	auto t0 = chrono::steady_clock::now();
-#endif
-
-	propagator.set_assumptions(cube);
-	for (int lit : cube)
-		solver.assume(lit);
-
-#if TRACK_TIME
-	double create_elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
-	total_cube_creation_time += create_elapsed;
-
-	t0 = chrono::steady_clock::now();
-#endif
-	int result = solver.solve();
-	solver.simplify();
-
-#if TRACK_TIME
-	double solve_elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
-	total_cube_solve_time += solve_elapsed;
-#else
-	static double solve_elapsed = -1.0;
-#endif
-
-	long long count = propagator.get_solution_count();
-	cout << "Cube " << cube_index << "(" << cube.size() << "): " << count << " partial solutions, took " << solve_elapsed << "/" << total_cube_solve_time << "s (" << create_elapsed << "/" << total_cube_creation_time <<"s)" << endl;
-	cout << "	Early clauses: " << propagator.get_early_blocking_count() << "/" << propagator.get_attempt_early_blocking_count() << "(" << get_refinement_count() << ")" << endl;
-
-	early_blocks += propagator.get_early_blocking_count();
-	early_blocks_total += propagator.get_attempt_early_blocking_count();
-
-	return count;
-}
-#else
 long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int>& cube, const int& cube_index, ExhaustiveSearch<FastPolicy>& propagator) {
 #if TRACK_TIME
 	auto t0 = chrono::steady_clock::now();
@@ -669,12 +623,11 @@ long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int
 
 	return count;
 }
-#endif
 
 // ---------------------------------------------------------------
 // Runs the entire encoding process from creating the solver to generating to cubes, then finishing by solving them all.
 // ---------------------------------------------------------------
-long long runEncoding(int template_id, int observed_syms_A, bool can_forget) {
+void runEncoding(int observed_syms_A, bool can_forget) {
 	auto timer = chrono::steady_clock::now();
 	cout << "Running Encoding:\n";
 
@@ -684,10 +637,10 @@ long long runEncoding(int template_id, int observed_syms_A, bool can_forget) {
 	cout << ")\n";
 
 	// --- Cubing phase ---
-	vector<vector<int>> cubes = generateCubes(tmpl, output_path, template_id);
+	vector<vector<int>> cubes = generateCubes(tmpl, output_path);
 	if (cubes.empty()) {
 		cout << "No cubes generated (formula UNSAT during cubing or march_cu error).\n";
-		return 0;
+		return;
 	}
 
 	cout << "	Creating SAT Instance:\n";
@@ -715,7 +668,6 @@ long long runEncoding(int template_id, int observed_syms_A, bool can_forget) {
 	init_creation_time = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 	
 	// --- Conquer phase (sequential for now; trivial to parallelise later) ---
-	long long total = 0;
 	int interval = max(1, min(2000, (int)cubes.size()/10));
 	auto wall_start = chrono::steady_clock::now();
 
@@ -727,7 +679,7 @@ long long runEncoding(int template_id, int observed_syms_A, bool can_forget) {
 
 	cout << "	Solving Cubes:" << endl;
 	for (int i = CUBE_START; i < cube_amount; ++i) {
-		total += solveOneCube(tmpl, cubes[i], i, propagator);
+		SOl_COUNT += solveOneCube(tmpl, cubes[i], i, propagator);
 		if(i % interval == 0) {
 			cout << i+1 << "/" << cubes.size() << ": average solve: " << total_cube_solve_time/(i + 1) << "s, average create: " << total_cube_creation_time/(i + 1) << "s, ETA: " << cubes.size() * (total_cube_solve_time/(i + 1) + total_cube_creation_time/(i + 1)) << "s" << endl;
 			cout.flush(); // to ensure cluster updates encase of timeout
@@ -738,9 +690,22 @@ long long runEncoding(int template_id, int observed_syms_A, bool can_forget) {
 	double total_elapsed = chrono::duration<double>(chrono::steady_clock::now() - wall_start).count();
 
 	cout << "\nTotal wall time: " << total_elapsed << "s\n";
-	cout << "Partial Solutions: " << total << "\n";
+	cout << "Partial Solutions: " << SOl_COUNT << "\n";
+}
 
-	return total;
+void print_output(bool completed) {
+	if(completed) 
+		cout << "\n=== FINAL RESULTS FOR TEMPLATE " << TEMPLATE_ID << " ===\n";
+	else
+		cout << "\n=== INCOMPLETE RESULTS FOR TEMPLATE " << TEMPLATE_ID << " ===\n";
+	cout << "Total partial solutions found: " << SOl_COUNT << "\n";
+	cout << "Total refinements found: " << get_refinement_count() << "\n";
+	cout << "Total early blocking attempts: " << early_blocks << "/" << early_blocks_total << "\n";
+	cout << "Total cubes: " << cube_count << "\n";
+
+	print_substep_timings_log(init_creation_time, 
+		total_minimize_setup, total_minimize_remove,
+		total_cube_gen_time, total_cube_creation_time, total_cube_solve_time);
 }
 
 // ---------------------------------------------------------------
@@ -751,12 +716,12 @@ int main(int argc, char* argv[]) {
 	std::signal(SIGINT,  handle_sigterm);
 
 	if (argc < 3) {
-		cerr << "Usage: " << argv[0] << " <output_directory> <template_id> (# of free vars to remove) (starting cube) (jobid) (seed) (maximum # of cubes)\n";
+		cerr << "Usage: " << argv[0] << " <output_directory> <TEMPLATE_ID> (# of free vars to remove) (starting cube) (jobid) (seed) (maximum # of cubes)\n";
 		return 1;
 	}
 
 	string output_path 	= argv[1];
-	int template_id     = atoi(argv[2]); 
+	TEMPLATE_ID     = atoi(argv[2]); 
 	int observed_syms_A = 10;
 	if (argc > 3) CUBE_R_PARAM 	= atoi(argv[3]);
 	if (argc > 4) CUBE_START 	= atoi(argv[4]);
@@ -770,13 +735,8 @@ int main(int argc, char* argv[]) {
 	string project_dir	= string(getenv("HOME")) + "/projects/def-stevens/mo13";
 	g_march_cu_path		= project_dir + "/CnC/march_cu/march_cu";
 
-#if COPY_MODE == 1
 	cout << "== Copy Model, each cube are turned into literals into their own solver copied from a base solver, no learned clauses transfer over. ==\n";
-#else
-	cout << "== Assumption Model, each cube are turned into assumptions into a single shared solver, learned clauses transfer over. ==\n";
-#endif
-
-	cout << "=== Finding all partial solutions for template " << template_id << " ===\n";
+	cout << "=== Finding all partial solutions for template " << TEMPLATE_ID << " ===\n";
 	cout << "observed_syms_A        : " << observed_syms_A        << "\n";
 	cout << "r_parameter            : " << CUBE_R_PARAM << "\n";
 	cout << "starting from cube     : " << CUBE_START << "\n";
@@ -801,25 +761,15 @@ int main(int argc, char* argv[]) {
 	
 	std::string binary_file = project_dir + "/Refinement-with-Candidate-Lines/templates.bin";
 	cout << "	Loading template from: " << binary_file << "\n";
-    tmpl = read_template_from_binary(binary_file, template_id);
+	tmpl = read_template_from_binary(binary_file);
 	if (tmpl[0].empty() || tmpl[1].empty()) {
 		cerr << "Failed to load a valid template.\n";
 		return -1;
 	}
 
 	setup(tmpl, output_path, JOB_ID);
-
-	long long sol_count = runEncoding(template_id, observed_syms_A, CANFORGET);
-
-	cout << "\n=== FINAL RESULTS FOR TEMPLATE " << template_id << " ===\n";
-	cout << "Total partial solutions found: " << sol_count << "\n";
-	cout << "Total refinements found: " << get_refinement_count() << "\n";
-	cout << "Total early blocking attempts: " << early_blocks << "/" << early_blocks_total << "\n";
-	cout << "Total cubes: " << cube_count << "\n";
-
-	print_substep_timings_log(init_creation_time, 
-		total_minimize_setup, total_minimize_remove,
-		total_cube_gen_time, total_cube_creation_time, total_cube_solve_time);
+	runEncoding(observed_syms_A, CANFORGET);
+	print_output(true);
 
 	return 0;
 }

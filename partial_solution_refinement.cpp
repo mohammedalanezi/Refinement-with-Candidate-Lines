@@ -684,11 +684,11 @@ int setup(const vector<vector<vector<int>>> tmpl, string path, string ID) {
 	output_path = path;
 #if WRITE_REFINEMENTS == 1
 	outfile.exceptions(std::ios::failbit | std::ios::badbit);
-    outfile.open(output_path + "/solutions_" + ID + ".bin", std::ios::binary | std::ios::out);
-    if (!outfile) {
-        std::cerr << "Cannot open 'solutions_" + ID + ".bin' for writing\n";
-        return 1;
-    }
+	outfile.open(output_path + "/solutions_" + ID + ".bin", std::ios::binary | std::ios::out);
+	if (!outfile) {
+		std::cerr << "Cannot open 'solutions_" + ID + ".bin' for writing\n";
+		return 1;
+	}
 #endif
 
 	ios::sync_with_stdio(false);
@@ -716,7 +716,7 @@ void print_substep_timings_log(double creation_time,
 		double total_cube_gen_time, double total_cube_creation_time, double total_cube_solve_time) {
 	double elapsed = chrono::duration<double>(chrono::steady_clock::now() - start_time).count(); 
 
-    outfile.close();
+	outfile.close();
 
 	cout << "\n======= SUBSTEP DEFINITION  =======\n";
 	cout << "When a partial solution is found in the SAT instance, we attempt to refine it into all its possible full solutions.\n";
