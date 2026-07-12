@@ -71,16 +71,15 @@ const vector<vector<vector<int>>> trivialTemplate = { {
  {1, 1, 1, 1, 0, 0, 0, 0, 0, 0},
  {1, 1, 1, 1, 0, 0, 0, 0, 0, 0}}};
 
-#if TRACK_TIME == 1 // This tracking probably doesn't work the best when we are multithreading, TODO: fix that
-double total_refinement_early_blocking = 0.0;
-double total_refinement_solve_time = 0.0;
-
+#if TRACK_TIME == 1 
 double candidate_find_time = 0.0;
 double precompute_time = 0.0;
 
 double total_line_intersection_time = 0.0;
-
 double total_line_covering_time = 0.0;
+
+double total_refinement_early_blocking = 0.0;
+double total_refinement_solve_time = 0.0;
 #endif
 
 struct U128Hash {
@@ -658,27 +657,25 @@ bool solve_partial_solution(const int sym_A_idx[order]) {
 	found_B_refinements.clear();
 
 	long int refinement_count = processLine(sym_A_idx, found_B_refinements);
-	if (refinement_count > 0) {
-		total_refinements += refinement_count;
+	if (!g_test_mode)
+		if (refinement_count > 0) {
+			total_refinements += refinement_count;
 #if WRITE_REFINEMENTS == 1
-		write_separator(outfile);
-		// Write all 10 A lines compactly
-		for (int i = 0; i < order; ++i)
-			write_compact_line(outfile, cand_masks_A[sym_A_idx[i]]);
-
-		// Write every B-cover (10 lines each)
-		for (const auto& cover : found_B_refinements)
+			write_separator(outfile);
+			// Write all 10 A lines compactly
 			for (int i = 0; i < order; ++i)
-				write_compact_line(outfile, cand_masks_B[cover[i]]);
+				write_compact_line(outfile, cand_masks_A[sym_A_idx[i]]);
+
+			// Write every B-cover (10 lines each)
+			for (const auto& cover : found_B_refinements)
+				for (int i = 0; i < order; ++i)
+					write_compact_line(outfile, cand_masks_B[cover[i]]);
 #endif
-		return false;
-	} else if (refinement_count < 0)
-		skipped_partial_solutions += 1;
+			return false;
+		} else if (refinement_count < 0)
+			skipped_partial_solutions += 1;
 	return true;
 }
-
-long int get_refinement_count() { return total_refinements; }
-long int get_skipped_count()    { return skipped_partial_solutions; }
 
 int setup(const vector<vector<vector<int>>> tmpl, string path, string ID) {
 	output_path = path;

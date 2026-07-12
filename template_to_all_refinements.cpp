@@ -28,8 +28,16 @@
 using namespace std; 
 
 // ---------------------------------------------------------------
-// Constants
+// Constants/Variables
 // ---------------------------------------------------------------
+
+bool g_test_mode = false;
+bool g_timeout_check_active = false;
+double g_cube_timeout_seconds = 0.0;
+int cubes_to_test = 3;
+chrono::steady_clock::time_point g_cube_start_time;
+
+struct CubeTimeoutException {};
 
 #define ORDER_DEFINED
 const int order        = 10;
@@ -69,6 +77,9 @@ int SAT_SEED = 0; // Seed of the Cubes, <= -1 adds no seed
 string JOB_ID = ""; // Job_id used for repeated calls to the same template
 
 #include "partial_solution_refinement.cpp"
+
+void print_output(bool completed);
+vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const string& parent_dir);
 
 static void handle_sigterm(int) {
 	print_output(false);
@@ -219,6 +230,12 @@ struct FastPolicy {
 	explicit operator bool() const { return true; }
 
 	void notify_assignment(int var, int lit) const {
+		if (g_timeout_check_active) { // only active while r-tuning is probing a sample cube
+			double elapsed = chrono::duration<double>(chrono::steady_clock::now() - g_cube_start_time).count();
+			if (elapsed > g_cube_timeout_seconds)
+				throw CubeTimeoutException{};
+		}
+
 		if (var > order * order * order || lit < 0) return; // only sq=0, only pos lits and unassignments
 
 		const VarInfo& vi = var_lookup[var];
@@ -516,6 +533,148 @@ static vector<vector<int>> parseCubesFile(const string& path) { // Parses an .ic
 	return cubes;
 }
 
+// ---------------------------------------------------------------
+// Adaptive r-parameter tuning
+// ---------------------------------------------------------------
+static const double R_TEST_TIMEOUT_SECONDS = 60.0 * 3.0;
+static const double R_TEST_TARGET_SECONDS = 75.0;
+static const double R_INCREASE_FACTOR = 1.20; // factor r is grown by each failure 
+
+void print_r_parameter() {
+	cout << "r_parameter            : " << CUBE_R_PARAM << "\n";
+	cout.flush();
+}
+
+bool testSolveCube(const vector<int>& cube, double& elapsed_out) {
+	CaDiCaL::Solver copy;
+	solver.copy(copy);
+	for (int lit : cube)
+		copy.clause(lit);
+
+	ExhaustiveSearch<FastPolicy> propagator_(&copy, opts, FastPolicy());
+
+	g_test_mode = true;
+	g_timeout_check_active = true;
+	g_cube_timeout_seconds = R_TEST_TIMEOUT_SECONDS;
+	g_cube_start_time = chrono::steady_clock::now();
+
+	bool timed_out = false;
+	try {
+		copy.solve();
+	} catch (const CubeTimeoutException&) {
+		timed_out = true;
+	}
+
+	g_timeout_check_active = false;
+	g_test_mode = false;
+
+	elapsed_out = chrono::duration<double>(chrono::steady_clock::now() - g_cube_start_time).count();
+	return timed_out;
+}
+
+vector<int> pickSampleCubeIndices(int cube_amount) {
+	vector<int> idxs;
+	if (cube_amount <= 0) return idxs;
+
+	if (cube_amount <= cubes_to_test) {
+		for (int i = 0; i < cube_amount; ++i)
+			idxs.push_back(i);
+		return idxs;
+	}
+
+	for (int i = 0; i < cubes_to_test; ++i) {
+		int start = (i * cube_amount) / cubes_to_test;
+		int end   = ((i + 1) * cube_amount) / cubes_to_test;
+
+		// pick uniformly from [start, end)
+		int idx = start + rand() % max(1, end - start);
+		idxs.push_back(idx);
+	}
+	return idxs;
+}
+
+vector<vector<int>> tuneRParameter(const vector<vector<vector<int>>>& tmpl, const string& parent_dir) {
+	vector<vector<int>> cubes;
+
+	// best so far
+	int prev_r = -1;
+	double prev_estimate = -1.0;
+	vector<vector<int>> prev_cubes;
+
+	while (true) {
+		cout << "\n[r-tuning] Generating cubes with r=" << CUBE_R_PARAM << " to test timing...\n";
+		cubes = generateCubes(tmpl, parent_dir);
+		if (cubes.empty()) {
+			cout << "[r-tuning] No cubes generated; aborting r-tuning.\n";
+			break;
+		}
+
+		vector<int> sample = pickSampleCubeIndices((int)cubes.size());
+
+		bool any_timeout = false;
+		double total_time = 0.0;
+		int tested = 0;
+
+		for (int idx : sample) {
+			double elapsed = 0.0;
+			bool timed_out = testSolveCube(cubes[idx], elapsed);
+			cout << "[r-tuning] Test cube " << idx << "/" << cubes.size() << ": " << (timed_out ? "TIMEOUT" : "solved") << " in " << elapsed << "s\n";
+			cout.flush();
+
+			if (timed_out) {
+				any_timeout = true;
+				break;
+			}
+			total_time += elapsed;
+			++tested;
+		}
+
+		if (any_timeout) {
+			CUBE_R_PARAM = max(CUBE_R_PARAM + 1, (int)std::round(CUBE_R_PARAM * R_INCREASE_FACTOR));
+			print_r_parameter();
+			continue;
+		}
+
+		double avg = tested > 0 ? total_time / tested : 0.0;
+		double estimate = cubes.size() * avg; // total cubes * (tested_cube_time / tested_cube_amount)
+		cout << "[r-tuning] Average test cube time: " << avg << "s over " << tested << " cube(s)\n";
+		cout << "[r-tuning] Estimated total solve time at r=" << CUBE_R_PARAM << ": " << estimate << "s (" << cubes.size() << " cubes * " << avg << "s avg)\n";
+
+		if (avg <= R_TEST_TARGET_SECONDS) {
+			CUBE_R_PARAM = -CUBE_R_PARAM; 
+			print_r_parameter();
+			break;
+		}
+
+		if (prev_estimate >= 0.0 && estimate > prev_estimate) {
+			cout << "[r-tuning] Estimated time increased (" << estimate << "s > " << prev_estimate << "s at r=" << prev_r << "); reverting to r=" << prev_r << " and continuing.\n";
+			CUBE_R_PARAM = -prev_r;
+			cubes = std::move(prev_cubes);
+			print_r_parameter();
+			break;
+		}
+
+		prev_r = CUBE_R_PARAM;
+		prev_estimate = estimate;
+		prev_cubes = cubes;
+
+		CUBE_R_PARAM = max(CUBE_R_PARAM + 1, (int)std::round(CUBE_R_PARAM * R_INCREASE_FACTOR));
+		print_r_parameter();
+	}
+
+	cout << "pruning done, resetting variables\n";
+	total_refinement_solve_time = 0.0;
+	total_refinement_early_blocking = 0.0;
+	total_line_covering_time = 0.0;
+	total_line_intersection_time = 0.0;
+
+	partial_count = 0;
+	total_refinements = 0;
+	skipped_partial_solutions = 0;
+
+	return cubes;
+}
+
 // Generates cubes by:
 //   1. Writing the formula to a temporary DIMACS .cnf file
 //   2. Shelling out to march_cu with:
@@ -616,7 +775,7 @@ long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int
 
 	long long count = propagator_.get_solution_count();
 	cout << "Cube " << cube_index << "(" << cube.size() << "): " << count << " partial solutions, took " << solve_elapsed << "/" << total_cube_solve_time << "s (" << create_elapsed << "/" << total_cube_creation_time <<"s)" << endl;
-	cout << "	Early clauses: " << propagator_.get_early_blocking_count() << "/" << propagator_.get_attempt_early_blocking_count() << "(" << get_refinement_count() << ", " << get_skipped_count() << ")" << endl;
+	cout << "	Early clauses: " << propagator_.get_early_blocking_count() << "/" << propagator_.get_attempt_early_blocking_count() << "(" << total_refinements << ", " << skipped_partial_solutions << ")" << endl;
 
 	early_blocks += propagator_.get_early_blocking_count();
 	early_blocks_total += propagator_.get_attempt_early_blocking_count();
@@ -631,13 +790,14 @@ void runEncoding(int observed_syms_A, bool can_forget) {
 	auto timer = chrono::steady_clock::now();
 	cout << "Running Encoding:\n";
 
-	cout << "	Generating Cubes: march_cu (path=" << g_march_cu_path << ", -r=" << CUBE_R_PARAM << ", -m=" << Q_MAX_VAR << " [Q vars only]";
+	int display_r = CUBE_R_PARAM < 0 ? -CUBE_R_PARAM : CUBE_R_PARAM;
+	cout << "	Generating Cubes: march_cu (path=" << g_march_cu_path << ", -r=" << display_r << ", -m=" << Q_MAX_VAR << " [Q vars only]";
 	if (CUBE_LIMIT > 0)
 		cout << ", -l=" << CUBE_LIMIT;
 	cout << ")\n";
 
 	// --- Cubing phase ---
-	vector<vector<int>> cubes = generateCubes(tmpl, output_path);
+	vector<vector<int>> cubes = (CUBE_R_PARAM > 0) ? tuneRParameter(tmpl, output_path) : generateCubes(tmpl, output_path);
 	if (cubes.empty()) {
 		cout << "No cubes generated (formula UNSAT during cubing or march_cu error).\n";
 		return;
@@ -699,7 +859,7 @@ void print_output(bool completed) {
 	else
 		cout << "\n=== INCOMPLETE RESULTS FOR TEMPLATE " << TEMPLATE_ID << " ===\n";
 	cout << "Total partial solutions found: " << SOl_COUNT << "\n";
-	cout << "Total refinements found: " << get_refinement_count() << "\n";
+	cout << "Total refinements found: " << total_refinements << "\n";
 	cout << "Total early blocking attempts: " << early_blocks << "/" << early_blocks_total << "\n";
 	cout << "Total cubes: " << cube_count << "\n";
 
@@ -738,7 +898,7 @@ int main(int argc, char* argv[]) {
 	cout << "== Copy Model, each cube are turned into literals into their own solver copied from a base solver, no learned clauses transfer over. ==\n";
 	cout << "=== Finding all partial solutions for template " << TEMPLATE_ID << " ===\n";
 	cout << "observed_syms_A        : " << observed_syms_A        << "\n";
-	cout << "r_parameter            : " << CUBE_R_PARAM << "\n";
+	print_r_parameter();
 	cout << "starting from cube     : " << CUBE_START << "\n";
 	cout << "will early block       : " << CANEARLY << "\n";
 	if(CANEARLY > 0) 
