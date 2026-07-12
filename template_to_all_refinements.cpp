@@ -548,7 +548,7 @@ void print_r_parameter() {
 bool testSolveCube(const vector<int>& cube, double& elapsed_out) {
 	CaDiCaL::Solver copy;
 	solver.copy(copy);
-	copy.resize(Q_MAX_VAR);
+	copy.resize(3 * Q_MAX_VAR);
 	for (int lit : cube)
 		copy.clause(lit);
 
@@ -751,7 +751,7 @@ long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int
 
 	CaDiCaL::Solver copy;
 	solver.copy(copy);
-	copy.resize(Q_MAX_VAR);
+	copy.resize(3 * Q_MAX_VAR);
 	for (int lit : cube)
 		copy.clause(lit);
 
