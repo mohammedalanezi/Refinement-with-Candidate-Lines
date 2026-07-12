@@ -25,6 +25,8 @@
 
 #define MIN_LINES 5 // 3-5 faster than 6 with no minimzation 
 
+#define ISCLUSTER 1
+
 using namespace std; 
 
 // ---------------------------------------------------------------
@@ -52,6 +54,8 @@ double init_creation_time = 0.0f;
 double total_cube_creation_time = 0.0f;
 double total_cube_solve_time = 0.0f;
 double total_cube_gen_time = 0.0f;
+
+double total_tune_time = 0.0f;
 
 double total_minimize_setup = 0.0;
 double total_minimize_remove = 0.0;
@@ -232,8 +236,10 @@ struct FastPolicy {
 	void notify_assignment(int var, int lit) const {
 		if (g_timeout_check_active) { // only active while r-tuning is probing a sample cube
 			double elapsed = chrono::duration<double>(chrono::steady_clock::now() - g_cube_start_time).count();
-			if (elapsed > g_cube_timeout_seconds)
+			if (elapsed > g_cube_timeout_seconds) {
+				cout << "timed out\n";
 				throw CubeTimeoutException{};
+			}
 		}
 
 		if (var > order * order * order || lit < 0) return; // only sq=0, only pos lits and unassignments
@@ -594,14 +600,16 @@ vector<int> pickSampleCubeIndices(int cube_amount) {
 }
 
 vector<vector<int>> tuneRParameter(const vector<vector<vector<int>>>& tmpl, const string& parent_dir) {
+#if TRACK_TIME
+	auto t0 = chrono::steady_clock::now();
+#endif
 	vector<vector<int>> cubes;
 
-	// best so far
-	int prev_r = -1;
+	int prev_r = -1; // best so far
 	double prev_estimate = -1.0;
 	vector<vector<int>> prev_cubes;
 
-	cout << "start tuning r\n";
+	cout << "[r-tuning] START:\n";
 
 	while (true) {
 		cout << "\n[r-tuning] Generating cubes with r=" << CUBE_R_PARAM << " to test timing...\n";
@@ -643,6 +651,7 @@ vector<vector<int>> tuneRParameter(const vector<vector<vector<int>>>& tmpl, cons
 		cout << "[r-tuning] Estimated total solve time at r=" << CUBE_R_PARAM << ": " << estimate << "s (" << cubes.size() << " cubes * " << avg << "s avg)\n";
 
 		if (avg <= R_TEST_TARGET_SECONDS) {
+			cout << "r-tuning] Average test cube time below target: " << R_TEST_TARGET_SECONDS << "s, ending early\n";
 			CUBE_R_PARAM = -CUBE_R_PARAM; 
 			print_r_parameter();
 			break;
@@ -664,15 +673,19 @@ vector<vector<int>> tuneRParameter(const vector<vector<vector<int>>>& tmpl, cons
 		print_r_parameter();
 	}
 
-	cout << "pruning done, resetting variables\n";
-	total_refinement_solve_time = 0.0;
-	total_refinement_early_blocking = 0.0;
-	total_line_covering_time = 0.0;
-	total_line_intersection_time = 0.0;
+	cout << "[r-tuning] DONE, resetting variables:\n";
+	//total_refinement_solve_time = 0.0;
+	//total_refinement_early_blocking = 0.0;
+	//total_line_covering_time = 0.0;
+	//total_line_intersection_time = 0.0;
 
 	partial_count = 0;
 	total_refinements = 0;
 	skipped_partial_solutions = 0;
+	
+#if TRACK_TIME
+	total_tune_time = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
+#endif
 
 	return cubes;
 }
@@ -714,7 +727,7 @@ vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const
 		//   -l CUBE_LIMIT 	 : combine cubes up to a maximum amount
 		//   -o cubes_path   : write cubes here
 		ostringstream cmd;
-		cmd << g_march_cu_path << " " << cnf_path << " -r " << CUBE_R_PARAM << " -m " << Q_MAX_VAR;
+		cmd << g_march_cu_path << " " << cnf_path << " -r " << abs(CUBE_R_PARAM) << " -m " << Q_MAX_VAR;
 		if (CUBE_LIMIT > 0)
 			cmd << " -l " << CUBE_LIMIT;
 		cmd << " -o " << cubes_path;
@@ -743,7 +756,7 @@ vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const
 // ---------------------------------------------------------------
 // Solves a single cube: reuses central solver, adds cube as assumption literals, then runs the exhaustive enumeration.
 // ---------------------------------------------------------------
-long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int>& cube, const int& cube_index, ExhaustiveSearch<FastPolicy>& propagator) {
+long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int>& cube, const int& cube_index) {
 #if TRACK_TIME
 	auto t0 = chrono::steady_clock::now();
 #endif
@@ -798,6 +811,20 @@ void runEncoding(int observed_syms_A, bool can_forget) {
 	solver.set("seed", SAT_SEED);
 	buildFormula(solver, tmpl);
 
+	vector<int> observed;
+	observed.reserve(observed_syms_A * order * order);
+	for (int s = 0; s < observed_syms_A; ++s)
+		for (int r = 0; r < order; ++r)
+			for (int c = 0; c < order; ++c)
+				observed.push_back(var(0, r, c, s));
+				
+	opts.to_observe = observed;
+	opts.only_neg   = true;
+	opts.can_forget = can_forget;
+	
+	FastPolicy proc = FastPolicy();
+	ExhaustiveSearch<FastPolicy> propagator(&solver, opts, proc); // TODO: both not needed when COPY_MODE == 1?
+
 	int display_r = CUBE_R_PARAM < 0 ? -CUBE_R_PARAM : CUBE_R_PARAM;
 	cout << "	Generating Cubes: march_cu (path=" << g_march_cu_path << ", -r=" << display_r << ", -m=" << Q_MAX_VAR << " [Q vars only]";
 	if (CUBE_LIMIT > 0)
@@ -810,20 +837,6 @@ void runEncoding(int observed_syms_A, bool can_forget) {
 		cout << "No cubes generated (formula UNSAT during cubing or march_cu error).\n";
 		return;
 	}
-
-	vector<int> observed;
-	observed.reserve(observed_syms_A * order * order);
-	for (int s = 0; s < observed_syms_A; ++s)
-		for (int r = 0; r < order; ++r)
-			for (int c = 0; c < order; ++c)
-				observed.push_back(var(0, r, c, s));
-				
-	opts.to_observe = observed;
-	opts.only_neg   = true;
-	opts.can_forget = can_forget;
-
-	FastPolicy proc = FastPolicy();
-	ExhaustiveSearch<FastPolicy> propagator(&solver, opts, proc); // TODO: both not needed when COPY_MODE == 1?
 
 	init_creation_time = chrono::duration<double>(chrono::steady_clock::now() - timer).count();
 	
@@ -839,7 +852,7 @@ void runEncoding(int observed_syms_A, bool can_forget) {
 
 	cout << "	Solving Cubes:" << endl;
 	for (int i = CUBE_START; i < cube_amount; ++i) {
-		SOl_COUNT += solveOneCube(tmpl, cubes[i], i, propagator);
+		SOl_COUNT += solveOneCube(tmpl, cubes[i], i);
 		if(i % interval == 0) {
 			cout << i+1 << "/" << cubes.size() << ": average solve: " << total_cube_solve_time/(i + 1) << "s, average create: " << total_cube_creation_time/(i + 1) << "s, ETA: " << cubes.size() * (total_cube_solve_time/(i + 1) + total_cube_creation_time/(i + 1)) << "s" << endl;
 			cout.flush(); // to ensure cluster updates encase of timeout
@@ -863,7 +876,7 @@ void print_output(bool completed) {
 	cout << "Total early blocking attempts: " << early_blocks << "/" << early_blocks_total << "\n";
 	cout << "Total cubes: " << cube_count << "\n";
 
-	print_substep_timings_log(init_creation_time, 
+	print_substep_timings_log(init_creation_time, total_tune_time,
 		total_minimize_setup, total_minimize_remove,
 		total_cube_gen_time, total_cube_creation_time, total_cube_solve_time);
 }
@@ -892,8 +905,15 @@ int main(int argc, char* argv[]) {
 	freopen((output_path + "/refinements_" + JOB_ID + ".log").c_str(), "w", stdout);
 	freopen((output_path + "/refinements_" + JOB_ID + ".log").c_str(), "a", stderr); // Redirect all cout output into a log file instead of the terminal
 
+#if ISCLUSTER == 1
 	string project_dir	= string(getenv("HOME")) + "/projects/def-stevens/mo13";
 	g_march_cu_path		= project_dir + "/CnC/march_cu/march_cu";
+	std::string binary_file = project_dir + "/Refinement-with-Candidate-Lines/templates.bin";
+#else
+	string project_dir = ".";
+	g_march_cu_path		= project_dir + "./CnC-master/march_cu/march_cu";
+	std::string binary_file = project_dir + "/templates.bin";
+#endif
 
 	cout << "== Copy Model, each cube are turned into literals into their own solver copied from a base solver, no learned clauses transfer over. ==\n";
 	cout << "=== Finding all partial solutions for template " << TEMPLATE_ID << " ===\n";
@@ -919,7 +939,6 @@ int main(int argc, char* argv[]) {
 		return 1;
 	}
 	
-	std::string binary_file = project_dir + "/Refinement-with-Candidate-Lines/templates.bin";
 	cout << "	Loading template from: " << binary_file << "\n";
 	tmpl = read_template_from_binary(binary_file);
 	if (tmpl[0].empty() || tmpl[1].empty()) {

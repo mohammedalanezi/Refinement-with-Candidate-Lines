@@ -708,7 +708,7 @@ int setup(const vector<vector<vector<int>>> tmpl, string path, string ID) {
 	return 0;
 }
 
-void print_substep_timings_log(double creation_time,
+void print_substep_timings_log(double creation_time, double total_cube_tune_time,
 		double total_minimize_setup, double total_minimize_remove,
 		double total_cube_gen_time, double total_cube_creation_time, double total_cube_solve_time) {
 	double elapsed = chrono::duration<double>(chrono::steady_clock::now() - start_time).count(); 
@@ -736,7 +736,7 @@ void print_substep_timings_log(double creation_time,
 	double post_processing = minimize_total;
 	
 	double sat_internal = total_cube_solve_time - (minimize_total + substep_total);
-	double cubing_total = total_cube_gen_time + total_cube_creation_time + sat_internal;
+	double cubing_total = total_cube_gen_time + total_cube_tune_time + total_cube_creation_time + sat_internal;
 	
 	double accounted = creation_time + cubing_total + substep_total + post_processing;
 	double other = elapsed - accounted;
@@ -745,6 +745,8 @@ void print_substep_timings_log(double creation_time,
 	cout << "   Cube (SAT -> Solving + Early -> Minimize) -> Substep (INPUT -> FILTER -> REFINEMENT)\n";
 	
 	cout << "Cube:\n";
+	if(total_tune_time > 0)
+		cout << "   Tuning r: " << total_tune_time << "s\n"; // march_cu
 	cout << "   Generation: " << total_cube_gen_time << "s\n"; // march_cu
 	cout << "   Solver Creation: " << total_cube_creation_time << "s\n";
 	cout << "   Solving: " << total_cube_solve_time - substep_total << "s\n"; // cadical
