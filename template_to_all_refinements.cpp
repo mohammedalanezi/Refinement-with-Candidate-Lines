@@ -692,10 +692,8 @@ vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const
 	if (CUBE_R_PARAM > 0) { // negative r values imply we have already created the cubes
 		{ // Step 1: build a temporary solver just to dump the DIMACS file
 			cout << "  Writing CNF to: " << cnf_path << "\n";
-			CaDiCaL::Solver dumper; // TODO: could copy instead?
-			dumper.set("inprocessing", 0);
-			dumper.set("factor",       0);
-			buildFormula(dumper, tmpl);
+			CaDiCaL::Solver dumper; 
+			solver.copy(dumper);
 #if FULL_DUMP == 1
 			int stdout_save = dup(fileno(stdout));
 			freopen(cnf_path.c_str(), "w", stdout);
