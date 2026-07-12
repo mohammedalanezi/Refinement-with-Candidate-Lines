@@ -548,6 +548,7 @@ void print_r_parameter() {
 bool testSolveCube(const vector<int>& cube, double& elapsed_out) {
 	CaDiCaL::Solver copy;
 	solver.copy(copy);
+	copy.resize(Q_MAX_VAR);
 	for (int lit : cube)
 		copy.clause(lit);
 
@@ -600,6 +601,8 @@ vector<vector<int>> tuneRParameter(const vector<vector<vector<int>>>& tmpl, cons
 	int prev_r = -1;
 	double prev_estimate = -1.0;
 	vector<vector<int>> prev_cubes;
+
+	cout << "start tuning r\n";
 
 	while (true) {
 		cout << "\n[r-tuning] Generating cubes with r=" << CUBE_R_PARAM << " to test timing...\n";
@@ -748,6 +751,7 @@ long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int
 
 	CaDiCaL::Solver copy;
 	solver.copy(copy);
+	copy.resize(Q_MAX_VAR);
 	for (int lit : cube)
 		copy.clause(lit);
 
