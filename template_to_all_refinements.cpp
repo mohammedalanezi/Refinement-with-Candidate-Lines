@@ -548,7 +548,6 @@ void print_r_parameter() {
 bool testSolveCube(const vector<int>& cube, double& elapsed_out) {
 	CaDiCaL::Solver copy;
 	solver.copy(copy);
-	copy.resize(3 * Q_MAX_VAR);
 	for (int lit : cube)
 		copy.clause(lit);
 
@@ -751,7 +750,6 @@ long long solveOneCube(const vector<vector<vector<int>>>& tmpl, const vector<int
 
 	CaDiCaL::Solver copy;
 	solver.copy(copy);
-	copy.resize(3 * Q_MAX_VAR);
 	for (int lit : cube)
 		copy.clause(lit);
 
@@ -792,6 +790,14 @@ void runEncoding(int observed_syms_A, bool can_forget) {
 	auto timer = chrono::steady_clock::now();
 	cout << "Running Encoding:\n";
 
+	cout << "	Creating SAT Instance:\n";
+	solver.set("factor",       0);
+	solver.set("factorcheck",  0);
+	solver.set("inprocessing", 0);
+	solver.set("report",       0);
+	solver.set("seed", SAT_SEED);
+	buildFormula(solver, tmpl);
+
 	int display_r = CUBE_R_PARAM < 0 ? -CUBE_R_PARAM : CUBE_R_PARAM;
 	cout << "	Generating Cubes: march_cu (path=" << g_march_cu_path << ", -r=" << display_r << ", -m=" << Q_MAX_VAR << " [Q vars only]";
 	if (CUBE_LIMIT > 0)
@@ -804,14 +810,6 @@ void runEncoding(int observed_syms_A, bool can_forget) {
 		cout << "No cubes generated (formula UNSAT during cubing or march_cu error).\n";
 		return;
 	}
-
-	cout << "	Creating SAT Instance:\n";
-	solver.set("factor",       0);
-	solver.set("factorcheck",  0);
-	solver.set("inprocessing", 0);
-	solver.set("report",       0);
-	solver.set("seed", SAT_SEED);
-	buildFormula(solver, tmpl);
 
 	vector<int> observed;
 	observed.reserve(observed_syms_A * order * order);
