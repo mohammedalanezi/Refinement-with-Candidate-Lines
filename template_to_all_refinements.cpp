@@ -603,7 +603,7 @@ vector<int> pickSampleCubeIndices(int cube_amount) {
 		idxs.push_back(idx);
 	}
 
-	idxs.push_back(1);
+	idxs.push_back(0);
 
 	return idxs;
 }
