@@ -34,12 +34,13 @@ using namespace std;
 // ---------------------------------------------------------------
 
 bool g_test_mode = false;
-bool g_timeout_check_active = false;
-double g_cube_timeout_seconds = 0.0;
-int cubes_to_test = 3;
+int cubes_to_test = 4;
 chrono::steady_clock::time_point g_cube_start_time;
 
-struct CubeTimeoutException {};
+static const double R_TEST_TIMEOUT_SECONDS = 60.0 * 3.0;
+static const double R_TEST_TARGET_SECONDS = 90.0;
+static const double R_INCREASE_FACTOR = 1.2; // factor r is grown by each failure 
+static const int R_MAX_INCREASE = 20;
 
 #define ORDER_DEFINED
 const int order        = 10;
@@ -55,7 +56,7 @@ double total_cube_creation_time = 0.0f;
 double total_cube_solve_time = 0.0f;
 double total_cube_gen_time = 0.0f;
 
-double total_tune_time = 0.0f;
+double total_cube_tune_time = 0.0f;
 
 double total_minimize_setup = 0.0;
 double total_minimize_remove = 0.0;
@@ -71,7 +72,7 @@ string g_march_cu_path; // Path to the march_cu binary; set in main() from march
 
 // Number of free variables march_cu removes before emitting a cube (-r param).
 // Increase this to get more cubes (each harder cube). We wait to solve each cube in a couple minutes at most but not too fast where creation/destruction of cadical slows it down.
-int CUBE_R_PARAM = 20; // (when we rebuild a solver for each cube) 20 seems to be the fastest time after naive testing of various values between 5 and 50
+int CUBE_R_PARAM = 30; // Default value if none is set
 int CUBE_LIMIT = 0; // Max number of cubes that will be solved
 int CUBE_START = 0; // The cube to start solving from
 
@@ -234,14 +235,6 @@ struct FastPolicy {
 	explicit operator bool() const { return true; }
 
 	void notify_assignment(int var, int lit) const {
-		if (g_timeout_check_active) { // only active while r-tuning is probing a sample cube
-			double elapsed = chrono::duration<double>(chrono::steady_clock::now() - g_cube_start_time).count();
-			if (elapsed > g_cube_timeout_seconds) {
-				cout << "timed out\n";
-				throw CubeTimeoutException{};
-			}
-		}
-
 		if (var > order * order * order || lit < 0) return; // only sq=0, only pos lits and unassignments
 
 		const VarInfo& vi = var_lookup[var];
@@ -539,18 +532,35 @@ static vector<vector<int>> parseCubesFile(const string& path) { // Parses an .ic
 	return cubes;
 }
 
-// ---------------------------------------------------------------
-// Adaptive r-parameter tuning
-// ---------------------------------------------------------------
-static const double R_TEST_TIMEOUT_SECONDS = 60.0 * 3.0;
-static const double R_TEST_TARGET_SECONDS = 75.0;
-static const double R_INCREASE_FACTOR = 1.20; // factor r is grown by each failure 
-
 void print_r_parameter() {
 	cout << "r_parameter            : " << CUBE_R_PARAM << "\n";
 	cout.flush();
 }
 
+// ---------------------------------------------------------------
+// Timeout terminator: lets CaDiCaL unwind solve() cleanly
+// ---------------------------------------------------------------
+struct CubeTimeoutTerminator : public CaDiCaL::Terminator {
+	chrono::steady_clock::time_point start;
+	double limit_seconds;
+	bool   hit = false;
+
+	explicit CubeTimeoutTerminator(double limit_seconds_)
+		: start(chrono::steady_clock::now()), limit_seconds(limit_seconds_) {}
+
+	bool terminate() override {
+		double elapsed = chrono::duration<double>(chrono::steady_clock::now() - start).count();
+		if (elapsed > limit_seconds) {
+			hit = true;
+			return true;
+		}
+		return false;
+	}
+};
+
+// ---------------------------------------------------------------
+// Adaptive r-parameter tuning
+// ---------------------------------------------------------------
 bool testSolveCube(const vector<int>& cube, double& elapsed_out) {
 	CaDiCaL::Solver copy;
 	solver.copy(copy);
@@ -559,23 +569,19 @@ bool testSolveCube(const vector<int>& cube, double& elapsed_out) {
 
 	ExhaustiveSearch<FastPolicy> propagator_(&copy, opts, FastPolicy());
 
+	CubeTimeoutTerminator term(R_TEST_TIMEOUT_SECONDS);
+	copy.connect_terminator(&term);
+
 	g_test_mode = true;
-	g_timeout_check_active = true;
-	g_cube_timeout_seconds = R_TEST_TIMEOUT_SECONDS;
-	g_cube_start_time = chrono::steady_clock::now();
+	auto t_start = chrono::steady_clock::now();
 
-	bool timed_out = false;
-	try {
-		copy.solve();
-	} catch (const CubeTimeoutException&) {
-		timed_out = true;
-	}
+	copy.solve();   // returns 0 (UNKNOWN) if term.terminate() fired; no exception, solver stays valid
 
-	g_timeout_check_active = false;
 	g_test_mode = false;
+	elapsed_out = chrono::duration<double>(chrono::steady_clock::now() - t_start).count();
 
-	elapsed_out = chrono::duration<double>(chrono::steady_clock::now() - g_cube_start_time).count();
-	return timed_out;
+	copy.disconnect_terminator();   // good hygiene before copy/propagator_ go out of scope
+	return term.hit;
 }
 
 vector<int> pickSampleCubeIndices(int cube_amount) {
@@ -589,13 +595,16 @@ vector<int> pickSampleCubeIndices(int cube_amount) {
 	}
 
 	for (int i = 0; i < cubes_to_test; ++i) {
-		int start = (i * cube_amount) / cubes_to_test;
+		int start = max((i * cube_amount) / cubes_to_test, 1);
 		int end   = ((i + 1) * cube_amount) / cubes_to_test;
 
 		// pick uniformly from [start, end)
 		int idx = start + rand() % max(1, end - start);
 		idxs.push_back(idx);
 	}
+
+	idxs.push_back(1);
+
 	return idxs;
 }
 
@@ -640,7 +649,7 @@ vector<vector<int>> tuneRParameter(const vector<vector<vector<int>>>& tmpl, cons
 		}
 
 		if (any_timeout) {
-			CUBE_R_PARAM = max(CUBE_R_PARAM + 1, (int)std::round(CUBE_R_PARAM * R_INCREASE_FACTOR));
+			CUBE_R_PARAM = clamp((int)std::round(CUBE_R_PARAM * R_INCREASE_FACTOR), CUBE_R_PARAM + 1, CUBE_R_PARAM + R_MAX_INCREASE);
 			print_r_parameter();
 			continue;
 		}
@@ -684,7 +693,7 @@ vector<vector<int>> tuneRParameter(const vector<vector<vector<int>>>& tmpl, cons
 	skipped_partial_solutions = 0;
 	
 #if TRACK_TIME
-	total_tune_time = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
+	total_cube_tune_time = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
 #endif
 
 	return cubes;
@@ -727,7 +736,7 @@ vector<vector<int>> generateCubes(const vector<vector<vector<int>>>& tmpl, const
 		//   -l CUBE_LIMIT 	 : combine cubes up to a maximum amount
 		//   -o cubes_path   : write cubes here
 		ostringstream cmd;
-		cmd << g_march_cu_path << " " << cnf_path << " -r " << abs(CUBE_R_PARAM) << " -m " << Q_MAX_VAR;
+		cmd << g_march_cu_path << " " << cnf_path << " -r " << CUBE_R_PARAM << " -m " << Q_MAX_VAR;
 		if (CUBE_LIMIT > 0)
 			cmd << " -l " << CUBE_LIMIT;
 		cmd << " -o " << cubes_path;
@@ -876,7 +885,7 @@ void print_output(bool completed) {
 	cout << "Total early blocking attempts: " << early_blocks << "/" << early_blocks_total << "\n";
 	cout << "Total cubes: " << cube_count << "\n";
 
-	print_substep_timings_log(init_creation_time, total_tune_time,
+	print_substep_timings_log(init_creation_time, total_cube_tune_time,
 		total_minimize_setup, total_minimize_remove,
 		total_cube_gen_time, total_cube_creation_time, total_cube_solve_time);
 }
