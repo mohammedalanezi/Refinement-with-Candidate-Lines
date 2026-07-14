@@ -25,29 +25,26 @@
 
 #define MIN_LINES 5 // 3-5 faster than 6 with no minimzation 
 
-#define ISCLUSTER 1
+#define ISCLUSTER 0
 
 using namespace std; 
 
 // ---------------------------------------------------------------
-// Constants/Variables
+// Constants/Variables/Timings
 // ---------------------------------------------------------------
 
 bool g_test_mode = false;
-int cubes_to_test = 4;
 chrono::steady_clock::time_point g_cube_start_time;
 
-static const double R_TEST_TIMEOUT_SECONDS = 60.0 * 3.0;
-static const double R_TEST_TARGET_SECONDS = 90.0;
-static const double R_INCREASE_FACTOR = 1.2; // factor r is grown by each failure 
-static const int R_MAX_INCREASE = 20;
+static const int R_CUBES_TESTED = 4;
+static const double R_TEST_TARGET_SECONDS = 90.0; // we want to spent around a minute per cube
+static const double R_TEST_TIMEOUT_SECONDS = R_TEST_TARGET_SECONDS * R_CUBES_TESTED;
+static const int R_INCREASE = 10;
 
 #define ORDER_DEFINED
 const int order        = 10;
 const int latin_squares = 3;
-
-// max variable index for square Q (sq=0): vars 1 ... order^3, sent to march_cu's -m flag so it only branches on Q's variables
-const int Q_MAX_VAR = order * order * order;  // = 1000
+const int Q_MAX_VAR = order * order * order;  // max var index for Q (sq=0): vars 1 ... order^3, sent to march_cu -m flag so it only branches on Q's variables (1000)
 
 vector<vector<vector<int>>> tmpl(2);
 
@@ -68,13 +65,12 @@ long early_blocks_total = 0;
 
 CaDiCaL::Solver solver;
 ExhaustiveSearchOptions opts;
-string g_march_cu_path; // Path to the march_cu binary; set in main() from march_cu_dir.
+string g_march_cu_path; // path to the march_cu binary
 
-// Number of free variables march_cu removes before emitting a cube (-r param).
-// Increase this to get more cubes (each harder cube). We wait to solve each cube in a couple minutes at most but not too fast where creation/destruction of cadical slows it down.
-int CUBE_R_PARAM = 30; // Default value if none is set
+int CUBE_R_PARAM = 50; // Default number of free variables march_cu removes before emitting a cube (-r param)
 int CUBE_LIMIT = 0; // Max number of cubes that will be solved
 int CUBE_START = 0; // The cube to start solving from
+int CUBE_END = 0; // The cube to end solving at
 
 int TEMPLATE_ID = 0; // Current template we are solving
 int SOl_COUNT = 0; // Total number of partial solutions
@@ -114,7 +110,6 @@ inline int var(int sq, int r, int c, int s) {
 // ---------------------------------------------------------------
 // Template loading from binary file
 // ---------------------------------------------------------------
-
 std::vector<std::vector<std::vector<int>>> read_template_from_binary(const std::string& binary_path) {
 	// Result: 2 squares, each 10 rows of 10 ints
 	std::vector<std::vector<std::vector<int>>> tmpl(2, std::vector<std::vector<int>>(10, std::vector<int>(10, 0)));
@@ -588,22 +583,22 @@ vector<int> pickSampleCubeIndices(int cube_amount) {
 	vector<int> idxs;
 	if (cube_amount <= 0) return idxs;
 
-	if (cube_amount <= cubes_to_test) {
+	if (cube_amount <= R_CUBES_TESTED) {
 		for (int i = 0; i < cube_amount; ++i)
 			idxs.push_back(i);
 		return idxs;
 	}
+	
+	idxs.push_back(0);
 
-	for (int i = 0; i < cubes_to_test; ++i) {
-		int start = max((i * cube_amount) / cubes_to_test, 1);
-		int end   = ((i + 1) * cube_amount) / cubes_to_test;
+	for (int i = 0; i < R_CUBES_TESTED; ++i) {
+		int start = max((i * cube_amount) / R_CUBES_TESTED, 1);
+		int end   = ((i + 1) * cube_amount) / R_CUBES_TESTED;
 
 		// pick uniformly from [start, end)
 		int idx = start + rand() % max(1, end - start);
 		idxs.push_back(idx);
 	}
-
-	idxs.push_back(0);
 
 	return idxs;
 }
@@ -649,7 +644,7 @@ vector<vector<int>> tuneRParameter(const vector<vector<vector<int>>>& tmpl, cons
 		}
 
 		if (any_timeout) {
-			CUBE_R_PARAM = clamp((int)std::round(CUBE_R_PARAM * R_INCREASE_FACTOR), CUBE_R_PARAM + 1, CUBE_R_PARAM + R_MAX_INCREASE);
+			CUBE_R_PARAM = CUBE_R_PARAM + R_INCREASE;
 			print_r_parameter();
 			continue;
 		}
@@ -660,7 +655,7 @@ vector<vector<int>> tuneRParameter(const vector<vector<vector<int>>>& tmpl, cons
 		cout << "[r-tuning] Estimated total solve time at r=" << CUBE_R_PARAM << ": " << estimate << "s (" << cubes.size() << " cubes * " << avg << "s avg)\n";
 
 		if (avg <= R_TEST_TARGET_SECONDS) {
-			cout << "r-tuning] Average test cube time below target: " << R_TEST_TARGET_SECONDS << "s, ending early\n";
+			cout << "[r-tuning] Average test cube time below target: " << R_TEST_TARGET_SECONDS << "s, ending early\n";
 			CUBE_R_PARAM = -CUBE_R_PARAM; 
 			print_r_parameter();
 			break;
@@ -678,7 +673,7 @@ vector<vector<int>> tuneRParameter(const vector<vector<vector<int>>>& tmpl, cons
 		prev_estimate = estimate;
 		prev_cubes = cubes;
 
-		CUBE_R_PARAM = max(CUBE_R_PARAM + 1, (int)std::round(CUBE_R_PARAM * R_INCREASE_FACTOR));
+		CUBE_R_PARAM = CUBE_R_PARAM + R_INCREASE;
 		print_r_parameter();
 	}
 
@@ -858,9 +853,11 @@ void runEncoding(int observed_syms_A, bool can_forget) {
 	if(cubes.size() > MAX_CUBES)
 		cube_amount = MAX_CUBES;
 #endif
+	if (CUBE_END <= 0)
+		CUBE_END = cube_amount;
 
 	cout << "	Solving Cubes:" << endl;
-	for (int i = CUBE_START; i < cube_amount; ++i) {
+	for (int i = CUBE_START; i < CUBE_END; ++i) {
 		SOl_COUNT += solveOneCube(tmpl, cubes[i], i);
 		if(i % interval == 0) {
 			cout << i+1 << "/" << cubes.size() << ": average solve: " << total_cube_solve_time/(i + 1) << "s, average create: " << total_cube_creation_time/(i + 1) << "s, ETA: " << cubes.size() * (total_cube_solve_time/(i + 1) + total_cube_creation_time/(i + 1)) << "s" << endl;
@@ -898,7 +895,7 @@ int main(int argc, char* argv[]) {
 	std::signal(SIGINT,  handle_sigterm);
 
 	if (argc < 3) {
-		cerr << "Usage: " << argv[0] << " <output_directory> <TEMPLATE_ID> (# of free vars to remove) (starting cube) (jobid) (seed) (maximum # of cubes)\n";
+		cerr << "Usage: " << argv[0] << " <output_directory> <TEMPLATE_ID> (# of free vars to remove) (starting cube) (ending cube) (jobid) (seed) (maximum # of cubes)\n";
 		return 1;
 	}
 
@@ -907,9 +904,10 @@ int main(int argc, char* argv[]) {
 	int observed_syms_A = 10;
 	if (argc > 3) CUBE_R_PARAM 	= atoi(argv[3]);
 	if (argc > 4) CUBE_START 	= atoi(argv[4]);
-	if (argc > 5) JOB_ID		= argv[5];
-	if (argc > 6) SAT_SEED 		= atoi(argv[6]);
-	if (argc > 7) CUBE_LIMIT 	= atoi(argv[7]);
+	if (argc > 5) CUBE_END 		= atoi(argv[5]);
+	if (argc > 6) JOB_ID		= argv[6];
+	if (argc > 7) SAT_SEED 		= atoi(argv[7]);
+	if (argc > 8) CUBE_LIMIT 	= atoi(argv[8]);
 	
 	freopen((output_path + "/refinements_" + JOB_ID + ".log").c_str(), "w", stdout);
 	freopen((output_path + "/refinements_" + JOB_ID + ".log").c_str(), "a", stderr); // Redirect all cout output into a log file instead of the terminal
@@ -929,6 +927,7 @@ int main(int argc, char* argv[]) {
 	cout << "observed_syms_A        : " << observed_syms_A        << "\n";
 	print_r_parameter();
 	cout << "starting from cube     : " << CUBE_START << "\n";
+	cout << "ending at cube         : " << CUBE_END << "\n";
 	cout << "will early block       : " << CANEARLY << "\n";
 	if(CANEARLY > 0) 
 		cout << "   minimum lines       : " << MIN_LINES << "\n";
@@ -961,3 +960,6 @@ int main(int argc, char* argv[]) {
 
 	return 0;
 }
+
+// TODO: think about lowering the thersold for cube solving to below 90s (30s maybe) 
+//		so that the backpedal (if new r is slower than old r) to better variable more often
