@@ -735,8 +735,8 @@ void print_substep_timings_log(double creation_time, double total_cube_tune_time
 	double minimize_total = total_minimize_setup + total_minimize_remove;
 	double post_processing = minimize_total;
 	
-	double sat_internal = total_cube_solve_time - (minimize_total + substep_total);
-	double cubing_total = total_cube_gen_time + total_cube_tune_time + total_cube_creation_time + sat_internal;
+	double sat_internal = total_cube_solve_time - (minimize_total + line_total + refinement_total);
+	double cubing_total = (total_cube_tune_time > 0 ? total_cube_tune_time : total_cube_gen_time) + total_cube_creation_time + sat_internal;
 	
 	double accounted = creation_time + cubing_total + substep_total + post_processing;
 	double other = elapsed - accounted;
