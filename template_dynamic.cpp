@@ -1758,7 +1758,6 @@ static long long solveOneCube(CaDiCaL::Solver& base_solver, const ExhaustiveSear
  	long long count = propagator.get_solution_count();
  	cerr << "[cubing] Cube " << cube_index << " (" << cube.size() << " lits): " << count
  		 << " complete A squares, took " << solve_elapsed << "/" << total_cube_solve_time
-		 << "s solve (" << create_elapsed << "/" << total_cube_creation_time << "s create)\n";
 		 << "s solve (" << create_elapsed << "/" << total_cube_creation_time << "s create), " << (total_refinements - refinements_before) << " refinements\n";
 
 	return count;
