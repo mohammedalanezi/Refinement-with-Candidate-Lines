@@ -23,11 +23,8 @@ auto: automorphisms.cpp
 dynamic: template_dynamic.cpp automorphisms.cpp 4net_nauty.cpp partial_solution_refinement.cpp
 	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o template_dynamic template_dynamic.cpp $(NAUTY_LIB) $(LDFLAGS_BASE) $(LDFLAGS_RELEASE)
 
-count: count_nonisomorphic.cpp
-	$(CXX) $(CXXFLAGS_BASE) $(CXXFLAGS_RELEASE) -o count_nonisomorphic count_nonisomorphic.cpp $(NAUTY_LIB) $(LDFLAGS_BASE) $(LDFLAGS_RELEASE) -DTHREADSAFE
- 
 clean:
-	rm -f template_dynamic automorphisms count_nonisomorphic
+	rm -f template_dynamic automorphisms
 	find . -name "*.gcda" -delete
 	find . -name "*.gcno" -delete
 
