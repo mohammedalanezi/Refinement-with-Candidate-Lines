@@ -59,7 +59,7 @@ namespace TemplateAutoNS {
 using namespace std;
 
 // ---- Build configuration ----
-#define ISCLUSTER 0
+#define ISCLUSTER 1
 // Refinement step (see partial_solution_refinement.cpp): 0 = custom exact cover, 1 = exact cover as a SAT instance.
 #define SATREFINEMENT 1
 #define WRITE_PROOFS 1            // one DRAT proof per cube solve
@@ -1725,6 +1725,7 @@ static vector<vector<int>> tuneRParameter(CaDiCaL::Solver& base_solver, const Ex
 template <typename Policy>
 static long long solveOneCube(CaDiCaL::Solver& base_solver, const ExhaustiveSearchOptions& opts, const vector<int>& cube, int cube_index) {
 	auto t0 = chrono::steady_clock::now();
+	const long refinements_before = total_refinements;
 
 	CaDiCaL::Solver copy;
 
@@ -1754,10 +1755,11 @@ static long long solveOneCube(CaDiCaL::Solver& base_solver, const ExhaustiveSear
 	if (g_proof_blob_fp)
 		end_cube_proof_record(copy, proof_length_field_pos, proof_start_pos);
 
-	long long count = propagator.get_solution_count();
-	cerr << "[cubing] Cube " << cube_index << " (" << cube.size() << " lits): " << count
-		 << " complete A squares, took " << solve_elapsed << "/" << total_cube_solve_time
+ 	long long count = propagator.get_solution_count();
+ 	cerr << "[cubing] Cube " << cube_index << " (" << cube.size() << " lits): " << count
+ 		 << " complete A squares, took " << solve_elapsed << "/" << total_cube_solve_time
 		 << "s solve (" << create_elapsed << "/" << total_cube_creation_time << "s create)\n";
+		 << "s solve (" << create_elapsed << "/" << total_cube_creation_time << "s create), " << (total_refinements - refinements_before) << " refinements\n";
 
 	return count;
 }
