@@ -1,7 +1,7 @@
 #!/bin/bash
 # summarize_dynamic.sh: summary table of the template_dynamic runs found in an output directory.
 #
-#   ./summarize_dynamic.sh [OUTPUTDIR] [--csv FILE] [--details] [--only-incomplete] [--refs-from auto|cubes|solutions|logs] [--verify]
+#   ./summarize_dynamic.sh [OUTPUTDIR] [--csv FILE] [--details] [--only-incomplete] [--refs-from auto|cubes|solutions|logs] [--verify] [--no-dedup]
 #
 # OUTPUTDIR defaults to $SCRATCH/sat_solver/runs_dynamic. Only template_NNNN folders actually present are summarized.
 #
@@ -17,7 +17,7 @@ set -uo pipefail
 WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$WORKDIR/lib_dynamic.sh"
 
-OUTPUTDIR=""; CSV=""; DETAILS=0; ONLY_INCOMPLETE=0; REFS_FROM="auto"; VERIFY=0
+OUTPUTDIR=""; CSV=""; DETAILS=0; ONLY_INCOMPLETE=0; REFS_FROM="auto"; VERIFY=0; DEDUP=1
 RUNNING_WINDOW_MIN="${RUNNING_WINDOW_MIN:-15}"   # an unfinished template whose newest log changed within this many minutes shows as Running
 while (( $# )); do
     case "$1" in
@@ -26,6 +26,7 @@ while (( $# )); do
         --only-incomplete) ONLY_INCOMPLETE=1; shift ;;
         --refs-from) REFS_FROM="$2"; shift 2 ;;
         --verify) VERIFY=1; shift ;;
+        --no-dedup) DEDUP=0; shift ;;
         -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
         *) OUTPUTDIR="$1"; shift ;;
     esac
@@ -85,8 +86,54 @@ solutions_refs() {
     echo "$R $trunc"
 }
 
-tmp=$(mktemp); trap 'rm -f "$tmp"' EXIT
-[[ -n "$CSV" ]] && echo "template,refinements,time_s,ref_per_s,status,runs,complete_runs,split_sections,sections_done,a_squares,log_bytes,solutions_bytes,proofs_bytes,dyn_clause_bytes,slurm_bytes,cnf_bytes,cubes_bytes,total_bytes,r,total_cubes,aut_order,dup_cubes,solutions_truncated,refinements_from_logs,refs_flags,refs_source,refinements_in_files" > "$CSV"
+# sorted_logs <template_dir> -> the template's logs, oldest run first. A run's age is the start time in its runner header (date=...), not
+# the file mtime (mtime changes when folders are copied or moved); logs without a header fall back to mtime. Ties are broken by job id.
+sorted_logs() {
+    local dir="$1" f d
+    for f in "$dir"/$LOG_GLOB; do
+        d=$(log_header_field "$f" date)
+        [[ -n "$d" ]] || d=$(date -r "$f" +%Y-%m-%dT%H:%M:%S)
+        printf '%s\t%s\n' "$d" "$f"
+    done | sort -t$'\t' -k1,1 -k2,2V | cut -f2-
+}
+
+# Deduplicating record counter (python3). Prints: "REFINEMENTS UNIQUE_A_SQUARES TOTAL_RECORDS TRUNCATED_RECORDS"
+PYCOUNT=""
+if (( DEDUP )) && command -v python3 >/dev/null 2>&1; then
+    PYCOUNT=$(mktemp --suffix=.py)
+    cat > "$PYCOUNT" <<'PYEOF2'
+import sys, os, glob, mmap
+seen = {}                 # hash(A block) -> refinements of that record
+records = 0; truncated = 0
+for path in sorted(glob.glob(os.path.join(sys.argv[1], "solutions_*.bin"))):
+    size = os.path.getsize(path)
+    if size == 0:
+        continue
+    with open(path, "rb") as f:
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        try:
+            pos = mm.find(b"\xff", 0)
+            while pos != -1:
+                nxt = mm.find(b"\xff", pos + 1)
+                body = (size if nxt == -1 else nxt) - pos - 1
+                if body < 50 or (body - 50) % 50:
+                    truncated += 1                      # only the last record of a hard-killed file
+                else:
+                    k = (body - 50) // 50
+                    key = hash(mm[pos + 1:pos + 51])    # 50-byte A block
+                    records += 1
+                    if seen.get(key, -1) < k:           # a repeat is identical; keep the larger if a copy was damaged
+                        seen[key] = k
+                pos = nxt
+        finally:
+            mm.close()
+print(sum(seen.values()), len(seen), records, truncated)
+PYEOF2
+fi
+if (( DEDUP )) && [[ -z "$PYCOUNT" ]]; then echo "NOTE: python3 not found; solutions are counted without deduplication (module load python?)" >&2; fi
+
+tmp=$(mktemp); trap 'rm -f "$tmp" "$tmp.rows" "$tmp.run" "${PYCOUNT:-}"' EXIT
+[[ -n "$CSV" ]] && echo "template,refinements,time_s,ref_per_s,status,runs,complete_runs,split_sections,sections_done,a_squares,log_bytes,solutions_bytes,proofs_bytes,dyn_clause_bytes,slurm_bytes,cnf_bytes,cubes_bytes,total_bytes,r,total_cubes,aut_order,dup_cubes,solutions_truncated,refinements_from_logs,refs_flags,refs_source,refinements_in_files,duplicate_records_removed" > "$CSV"
 
 shopt -s nullglob
 dirs=("$OUTPUTDIR"/template_*/)
@@ -101,10 +148,12 @@ for dir in "${dirs[@]}"; do
     logs=( "$dir"/$LOG_GLOB )
     runs=${#logs[@]}
 
-    # ---- squares (dedup by cube index, newest log wins), time, refinements, completed runs
+    # ---- logs are read oldest run first, so for a cube solved in several logs the awk below keeps the line of the LATEST run
+    #      (A squares: latest line; refinements: latest line that carries a "N refinements" count)
     sq=0; secs=0; refs=0; ncomplete=0; newest=0; nosummary=0
     : > "$tmp"
-    for f in $(ls -1tr "$dir"/$LOG_GLOB 2>/dev/null); do
+    while read -r f; do
+        [[ -n "$f" ]] || continue
         log_is_complete "$f" && ncomplete=$((ncomplete+1))
         m=$(stat -c %Y "$f"); (( m > newest )) && newest=$m
         parse_log "$f" > "$tmp.run"
@@ -114,7 +163,7 @@ for dir in "${dirs[@]}"; do
         r=$(awk -F'\t' '$1=="refs"{x=$2} END{print x+0}' "$tmp.run"); refs=$((refs + r))
         grep -q '^cube' "$tmp.run" && ! grep -q '^refs' "$tmp.run" && nosummary=$((nosummary+1))
         grep '^cube' "$tmp.run" >> "$tmp"
-    done
+    done < <(sorted_logs "$dir")
     rm -f "$tmp.run"
     sq=$(awk -F'\t' '{last[$2]=$3} END{for(i in last) s+=last[i]; print s+0}' "$tmp")
     read -r refs_cubes cubes_missing < <(awk -F'\t' '{ if ($5 != "-") r[$2]=$5; seen[$2]=1 } END{ s=0; m=0; for (i in seen) { if (i in r) s+=r[i]; else m++ } print s+0, m+0 }' "$tmp")
@@ -149,7 +198,7 @@ for dir in "${dirs[@]}"; do
     b_all=$(( b_log + b_sol + b_prf + b_dyn + b_slr + b_cnf + b_cub ))
     aut=$(aut_order "$dir")
 
-    refs_logs=$refs; refs_files="-"; src=""; trunc=0; mark=""
+    refs_logs=$refs; refs_files="-"; src=""; trunc=0; mark=""; dup_recs="-"
     have_cubes=0; (( ncubes_done > 0 && cubes_missing == 0 )) && have_cubes=1
     case "$REFS_FROM" in
         auto)      (( have_cubes )) && src=cubes || src=solutions ;;
@@ -164,8 +213,14 @@ for dir in "${dirs[@]}"; do
                 (( refs_files != refs_final )) && mark+="!"
             fi ;;
         solutions)
-            read -r refs_final trunc < <(solutions_refs "$dir"); refs_files=$refs_final
-            (( dup_cubes > 0 )) && mark+="*"
+            if [[ -n "$PYCOUNT" ]]; then
+                read -r refs_final uniq_a tot_rec ntrunc < <(python3 "$PYCOUNT" "$dir")
+                dup_recs=$(( tot_rec - uniq_a )); (( ntrunc > 0 )) && trunc=1
+                refs_files=$refs_final
+            else
+                read -r refs_final trunc < <(solutions_refs "$dir"); refs_files=$refs_final
+                (( dup_cubes > 0 )) && mark+="*"
+            fi
             (( trunc )) && mark+="~" ;;
         logs)
             refs_final=$refs_logs
@@ -183,27 +238,28 @@ for dir in "${dirs[@]}"; do
     G_TYPE[slurm]=$((G_TYPE[slurm]+b_slr)); G_TYPE[cnf]=$((G_TYPE[cnf]+b_cnf)); G_TYPE[cubes]=$((G_TYPE[cubes]+b_cub))
 
     (( ONLY_INCOMPLETE && done_flag )) && continue
-    printf '%d\t%d\t%s\t%s\t%s\t%d\t%d\t%d/%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\n' \
-        "$id" "$refs_final" "$secs_i" "$rate" "$status" "$runs" "$ncomplete" "$sec_done" "$sec_total" "$sq" "$b_log" "$b_sol" "$b_prf" "$b_dyn" "$b_slr" "$b_cnf" "$b_cub" "$b_all" "${r_final:--}" "${total_cubes:--}" "$aut" "$dup_cubes" "$trunc" "$refs_logs" "${mark:--}" "$src" "$refs_files" >> "$tmp.rows"
-    [[ -n "$CSV" ]] && echo "$id,$refs_final,$secs_i,$rate,\"$status\",$runs,$ncomplete,$split,$sec_done/$sec_total,$sq,$b_log,$b_sol,$b_prf,$b_dyn,$b_slr,$b_cnf,$b_cub,$b_all,${r_final:-},${total_cubes:-},${aut/#-/},$dup_cubes,$trunc,$refs_logs,\"${mark}\",$src,${refs_files/#-/}" >> "$CSV"
+    printf '%d\t%d\t%s\t%s\t%s\t%d\t%d\t%d/%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%d\t%s\t%s\t%s\t%d\t%d\t%d\t%s\t%s\t%s\t%s\n' \
+        "$id" "$refs_final" "$secs_i" "$rate" "$status" "$runs" "$ncomplete" "$sec_done" "$sec_total" "$sq" "$b_log" "$b_sol" "$b_prf" "$b_dyn" "$b_slr" "$b_cnf" "$b_cub" "$b_all" "${r_final:--}" "${total_cubes:--}" "$aut" "$dup_cubes" "$trunc" "$refs_logs" "${mark:--}" "$src" "$refs_files" "$dup_recs" >> "$tmp.rows"
+    [[ -n "$CSV" ]] && echo "$id,$refs_final,$secs_i,$rate,\"$status\",$runs,$ncomplete,$split,$sec_done/$sec_total,$sq,$b_log,$b_sol,$b_prf,$b_dyn,$b_slr,$b_cnf,$b_cub,$b_all,${r_final:-},${total_cubes:-},${aut/#-/},$dup_cubes,$trunc,$refs_logs,\"${mark}\",$src,${refs_files/#-/},${dup_recs/#-/}" >> "$CSV"
 done
 touch "$tmp.rows"; sort -n "$tmp.rows" -o "$tmp.rows"
 
-printf '%5s  %12s  %12s  %10s  %26s  %8s\n' "No." "Squares" "Time (s)" "Sq./sec" "Status" "|Aut(T)|"
-awk -F'\t' '{m=($24=="-")?"":$24; printf "%5d  %12s  %12d  %10s  %26s  %8s\n", $1,$2 m,$3,$4,$5,$20}' "$tmp.rows"
+printf '%5s  %12s  %12s  %10s  %32s  %8s\n' "No." "Squares" "Time (s)" "Sq./sec" "Status" "|Aut(T)|"
+awk -F'\t' '{m=($24=="-")?"":$24; printf "%5d  %12s  %12d  %10s  %32s  %8s\n", $1,$2 m,$3,$4,$5,$20}' "$tmp.rows"
 g_rate=$(awk -v s="$g_ref" -v t="$g_time" 'BEGIN{ if (t>0) printf "%.1f", s/t; else printf "0.0" }')
-printf '%5s  %12d  %12.0f  %10s  %26s  %8s\n' "Total" "$g_ref" "$g_time" "$g_rate" "$n_done/$n_total completed" ""
+printf '%5s  %12d  %12.0f  %10s  %32s  %8s\n' "Total" "$g_ref" "$g_time" "$g_rate" "$n_done/$n_total completed" ""
 
 if (( DETAILS )); then
     echo; echo "Details (one row per template):  Runs = log files (complete in brackets), Split = sections done/total (1/1 = not split)"
-    printf '%5s  %9s  %6s  %14s  %9s  %9s  %9s  %9s  %9s  %6s  %8s  %8s  %6s  %9s\n' "No." "Runs(ok)" "Split" "A squares" "Logs" "Solutions" "Proofs" "DynClause" "Total" "r" "Cubes" "|Aut(T)|" "DupCub" "Src"
+    printf '%5s  %9s  %6s  %14s  %9s  %9s  %9s  %9s  %9s  %6s  %8s  %8s  %6s  %7s  %9s\n' "No." "Runs(ok)" "Split" "A squares" "Logs" "Solutions" "Proofs" "DynClause" "Total" "r" "Cubes" "|Aut(T)|" "DupCub" "DupRec" "Src"
     awk -F'\t' 'function h(b,  u,i){split("B K M G T",u," "); i=1; while(b>=1024&&i<5){b/=1024;i++} return sprintf("%.1f%s",b,u[i])}
-        {split($8,sp,"/"); splitcol=(sp[2]>1)? $8 : "-"; printf "%5d  %9s  %6s  %14d  %9s  %9s  %9s  %9s  %9s  %6s  %8s  %8s  %5d  %9s\n", $1, $6"("$7")", splitcol, $9, h($10), h($11), h($12), h($13), h($17), $18, $19, $20, $21, $25}' "$tmp.rows"
+        {split($8,sp,"/"); splitcol=(sp[2]>1)? $8 : "-"; printf "%5d  %9s  %6s  %14d  %9s  %9s  %9s  %9s  %9s  %6s  %8s  %8s  %5d  %7s  %9s\n", $1, $6"("$7")", splitcol, $9, h($10), h($11), h($12), h($13), h($17), $18, $19, $20, $21, $27, $25}' "$tmp.rows"
 fi
 
 echo
 echo "Totals across $n_total template folder(s) in $OUTPUTDIR"
 printf '  Refinements: %d   (source per template:' "$g_ref"; for k in cubes solutions logs; do (( ${n_src[$k]:-0} )) && printf ' %s=%d' "$k" "${n_src[$k]}"; done; echo ")"
+awk -F'\t' '$27 ~ /^[0-9]+$/ {n+=$27; t++} END{ if (t>0) printf "  Duplicate solution records removed (solutions source, %d template(s)): %d\n", t, n }' "$tmp.rows"
 printf '  Complete A squares (per-cube lines, deduplicated by cube index): %d\n' "$g_sq"
 (( n_marked > 0 )) && echo "  Flags present: see the header of this script (* ~ < ? !)"
 printf '  Compute time: %.0f s = %.1f core-hours = %.2f core-years\n' "$g_time" "$(awk -v t="$g_time" 'BEGIN{print t/3600}')" "$(awk -v t="$g_time" 'BEGIN{print t/31557600}')"
