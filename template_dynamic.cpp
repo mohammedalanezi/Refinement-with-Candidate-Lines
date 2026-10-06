@@ -46,6 +46,7 @@
 #include <filesystem>
 
 #include "cadical.hpp"
+#include "proofsizetracer.hpp"
 #include "exhaustive.hpp"
 #include "4net_nauty.cpp"
 
@@ -62,7 +63,7 @@ using namespace std;
 #define ISCLUSTER 1
 // Refinement step (see partial_solution_refinement.cpp): 0 = custom exact cover, 1 = exact cover as a SAT instance.
 #define SATREFINEMENT 1
-#define WRITE_PROOFS 1            // one DRAT proof per cube solve
+#define WRITE_PROOFS 1            // 0 = none, 1 = one DRAT proof per cube solve, 2 = internal DRAT checking (checkproof) + proof size (ProofSizeTracer) per cube
 #define WRITE_DYNAMIC_CLAUSES 1   // log automorphism-justified blocks to dynamic_clauses_<ID>.bin
 
 constexpr int order = 10;
@@ -1727,12 +1728,23 @@ static long long solveOneCube(CaDiCaL::Solver& base_solver, const ExhaustiveSear
 	auto t0 = chrono::steady_clock::now();
 	const long refinements_before = total_refinements;
 
+#if WRITE_PROOFS == 2
+	ProofSizeTracer proof_size_tracer; // declared before `copy` so it outlives the solver
+#endif
+
 	CaDiCaL::Solver copy;
 
+#if WRITE_PROOFS == 2
+	// Connect while the solver is still unconfigured, before the cube's unit clauses are added, so every lemma of the solve is counted.
+	copy.connect_proof_tracer(&proof_size_tracer, false);
+#endif
+
+#if WRITE_PROOFS == 1
 	// Trace the DRAT proof before the cube's unit clauses are added, so the whole solve is covered.
 	long long proof_length_field_pos = -1, proof_start_pos = -1;
 	if (g_proof_blob_fp)
 		proof_length_field_pos = begin_cube_proof_record(copy, (uint32_t)cube_index, proof_start_pos);
+#endif
 
 	base_solver.copy(copy);
 
@@ -1752,8 +1764,19 @@ static long long solveOneCube(CaDiCaL::Solver& base_solver, const ExhaustiveSear
 	double solve_elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
 	total_cube_solve_time += solve_elapsed;
 
+#if WRITE_PROOFS == 1
 	if (g_proof_blob_fp)
 		end_cube_proof_record(copy, proof_length_field_pos, proof_start_pos);
+#endif
+
+#if WRITE_PROOFS == 2
+	// The cube's proof was checked internally by checkproof; report its size through the tracer.
+	std::printf("c cube %d proof size:\n", cube_index);
+	proof_size_tracer.print();
+	std::cout.flush();
+	copy.disconnect_proof_tracer(&proof_size_tracer);
+	std::fflush(stdout);
+#endif
 
  	long long count = propagator.get_solution_count();
  	cerr << "[cubing] Cube " << cube_index << " (" << cube.size() << " lits): " << count
@@ -1926,6 +1949,11 @@ int main(int argc, char* argv[]) {
 	solver.set("inprocessing", 0);
 	solver.set("factorcheck", 0);
 	solver.set("factor", 0);
+#if WRITE_PROOFS == 2
+	// Internal DRAT checking
+	solver.set("check", 1);
+	solver.set("checkproof", 1);
+#endif
 	for (auto& [name, value] : solver_overrides) {
 		bool ok = solver.set(name.c_str(), value);
 		cerr << "solver.set(\"" << name << "\", " << value << ") -> " << (ok ? "ok" : "REJECTED (bad name or out of range)") << "\n";
