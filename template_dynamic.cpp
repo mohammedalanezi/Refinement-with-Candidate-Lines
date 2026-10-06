@@ -63,7 +63,7 @@ using namespace std;
 #define ISCLUSTER 1
 // Refinement step (see partial_solution_refinement.cpp): 0 = custom exact cover, 1 = exact cover as a SAT instance.
 #define SATREFINEMENT 1
-#define WRITE_PROOFS 1            // 0 = none, 1 = one DRAT proof per cube solve, 2 = internal DRAT checking (checkproof) + proof size (ProofSizeTracer) per cube
+#define WRITE_PROOFS 2            // 0 = none, 1 = one DRAT proof per cube solve, 2 = internal DRAT checking (checkproof) + proof size (ProofSizeTracer) per cube
 #define WRITE_DYNAMIC_CLAUSES 1   // log automorphism-justified blocks to dynamic_clauses_<ID>.bin
 
 constexpr int order = 10;
@@ -1534,7 +1534,12 @@ static vector<vector<int>> generateCubes(CaDiCaL::Solver& base_solver, const str
 			cerr << "[cubing] Writing CNF to: " << cnf_path << "\n";
 			CaDiCaL::Solver dumper;
 			base_solver.copy(dumper);
-			dumper.write_dimacs(cnf_path.c_str());
+			int stdout_save = dup(fileno(stdout));
+			freopen(cnf_path.c_str(), "w", stdout);
+			dumper.dump_cnf();
+			fflush(stdout);
+			dup2(stdout_save, fileno(stdout));
+			close(stdout_save);
 		}
 
 		ostringstream cmd;
@@ -1769,20 +1774,21 @@ static long long solveOneCube(CaDiCaL::Solver& base_solver, const ExhaustiveSear
 		end_cube_proof_record(copy, proof_length_field_pos, proof_start_pos);
 #endif
 
+ 	long long count = propagator.get_solution_count();
+
 #if WRITE_PROOFS == 2
-	// The cube's proof was checked internally by checkproof; report its size through the tracer.
-	std::printf("c cube %d proof size:\n", cube_index);
-	proof_size_tracer.print();
+ 	cerr << "[cubing] Cube " << cube_index << " (" << cube.size() << " lits): " << count
+ 		 << " complete A squares, took " << solve_elapsed << "/" << total_cube_solve_time
+		 << "s solve (" << create_elapsed << "/" << total_cube_creation_time << "s create), " 
+		 << (total_refinements - refinements_before) << " refinements, proof size: " << proof_size_tracer.bytes() << " bytes\n";
 	std::cout.flush();
 	copy.disconnect_proof_tracer(&proof_size_tracer);
 	std::fflush(stdout);
-#endif
-
- 	long long count = propagator.get_solution_count();
+#else
  	cerr << "[cubing] Cube " << cube_index << " (" << cube.size() << " lits): " << count
  		 << " complete A squares, took " << solve_elapsed << "/" << total_cube_solve_time
 		 << "s solve (" << create_elapsed << "/" << total_cube_creation_time << "s create), " << (total_refinements - refinements_before) << " refinements\n";
-
+#endif
 	return count;
 }
 
@@ -1927,7 +1933,8 @@ int main(int argc, char* argv[]) {
 	if (from_binary)
 		cout << "template_id=" << TEMPLATE_ID << "\n";
 	cout << "refinement engine=" << (SATREFINEMENT ? "SAT exact cover" : "custom exact cover") << "\n";
-	cout << "relation type=4^4 (4444)\n";
+	cout << "proof engine = " << (WRITE_PROOFS == 0 ? "no proofs" : (WRITE_PROOFS == 1 ? "DRAT proof per cube" : "internal DRAT proof check and proof size per cube")) << "\n";
+	cout << "relation type=4^4 (4444)\n"; 
 	cout << "cubing: " << (cubing_enabled ? "ON" : "OFF") << "\n";
 	if (cubing_enabled) {
 		cout << "  r_parameter: " << CUBE_R_PARAM << "\n";
