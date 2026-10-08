@@ -25,7 +25,7 @@ SUBMIT_SCRIPT="$WORKDIR/submit_batch_dynamic.sh"
 JOBNAME="tpls_refine"                 # must match #SBATCH --job-name in run_array_task_dynamic.sh
 POLL_INTERVAL=1200                    # seconds between squeue checks while a round is in flight (20 min, jobs run for hours, no need to check more often)
 POST_ROUND_SLEEP=30                   # short cooldown after a round drains before the next submit_batch_dynamic.sh call
-MAX_INFLIGHT_TO_TOP_UP="${MAX_INFLIGHT_TO_TOP_UP:-0}"   # X: submit the next round once pending/running '$JOBNAME' tasks drop to <= this many (0 = old behavior, wait for a full drain)
+MAX_INFLIGHT_TO_TOP_UP="${MAX_INFLIGHT_TO_TOP_UP:-500}"   # X: submit the next round once pending/running '$JOBNAME' tasks drop to <= this many (0 = old behavior, wait for a full drain)
 LOCKFILE="$WORKDIR/.auto_submit_loop_dynamic.lock"
 LOOPLOG="$WORKDIR/auto_submit_loop_dynamic.log"
 # Per-round submit_batch_dynamic.sh output, kept for later debugging. In scratch since it can accumulate a lot of files 
