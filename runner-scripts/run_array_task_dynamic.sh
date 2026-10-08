@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=tpls_refine
 #SBATCH --cpus-per-task=1
-#SBATCH --mem-per-cpu=1G
+#SBATCH --mem-per-cpu=8G
 #
 # --account, --time, --array, --output and --export are supplied on the sbatch command line by submit_batch_dynamic.sh and override the
 # placeholders below. They're only here so this script is also sbatch-able by itself while testing on a single index.
@@ -30,7 +30,7 @@ MARCH_CU="${MARCH_CU:-}"       # --march-cu
 OUTPUTDIR="${OUTPUTDIR:-${SCRATCH:?SCRATCH is not set -- are you on the cluster?}/sat_solver/runs_dynamic}"
 
 # Time left under the SLURM limit for the graceful stop. SIGTERM is sent at (limit - MARGIN); the binary then finishes its current cube.
-# SIGKILL follows KILL_GRACE seconds later. MARGIN must be > KILL_GRACE. Raise both if your cubes can run longer than ~5 minutes.
+# SIGKILL follows KILL_GRACE seconds later. MARGIN must be > KILL_GRACE (Note: Raise both if your cubes are running >=5 minutes).
 MARGIN="${MARGIN:-600}"
 KILL_GRACE="${KILL_GRACE:-420}"
 # ---------------------------------------------------------------------

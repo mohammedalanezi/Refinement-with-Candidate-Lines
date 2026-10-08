@@ -63,7 +63,7 @@ using namespace std;
 #define ISCLUSTER 1
 // Refinement step (see partial_solution_refinement.cpp): 0 = custom exact cover, 1 = exact cover as a SAT instance.
 #define SATREFINEMENT 1
-#define WRITE_PROOFS 2            // 0 = none, 1 = one DRAT proof per cube solve, 2 = internal DRAT checking (checkproof) + proof size (ProofSizeTracer) per cube
+#define WRITE_PROOFS 2            // 0 = none, 1 = one DRAT proof per cube solve, 2 = internal LRAT checking (checkproof) + DRAT proof size (ProofSizeTracer) per cube
 #define WRITE_DYNAMIC_CLAUSES 1   // log automorphism-justified blocks to dynamic_clauses_<ID>.bin
 
 constexpr int order = 10;
@@ -1481,8 +1481,8 @@ constexpr int Q_MAX_VAR = order * order * order;
 
 static string g_march_cu_path = default_march_cu_path;   // --march-cu
 
-// > 0: march_cu -r value; tuneRParameter() starts from it. It is stored negated once tuning has settled. <= 0: skip march_cu and reuse the cubes file
-// already on disk (see generateCubes()). Only used when --r is given.
+// > 0: march_cu -r value; tuneRParameter() starts from it. It is stored negated once tuning has settled. <= 0: skip march_cu and reuse the cubes file already on disk (see generateCubes()). 
+// Only used when --r is given.
 static int CUBE_R_PARAM = 50;
 static int CUBE_LIMIT   = 0;   // march_cu -l: cap on the number of cubes; 0 keeps march_cu's default
 static int CUBE_START   = 0;   // first cube to solve (inclusive), to split a run across invocations
@@ -1495,8 +1495,8 @@ static double total_cube_gen_time      = 0.0;   // last march_cu invocation
 static double total_cube_tune_time     = 0.0;   // all of tuneRParameter()
 static int    cube_count = 0;                   // cubes returned by the last generateCubes()
 
-static const int R_CUBES_TESTED = 4;                                                  // cubes sampled per tuning round, besides cube 0
-static const double R_TEST_TARGET_SECONDS  = 75.0;                                    // desired average time per real cube
+static const int R_CUBES_TESTED = 5;                                                  // cubes sampled per tuning round, besides cube 0
+static const double R_TEST_TARGET_SECONDS  = 90.0;                                    // desired average time per real cube
 static const double R_TEST_TIMEOUT_SECONDS = R_TEST_TARGET_SECONDS * R_CUBES_TESTED;  // per-probe timeout
 static const int R_INCREASE = 10;                                                     // growth of r between rounds
 
@@ -1933,7 +1933,7 @@ int main(int argc, char* argv[]) {
 	if (from_binary)
 		cout << "template_id=" << TEMPLATE_ID << "\n";
 	cout << "refinement engine=" << (SATREFINEMENT ? "SAT exact cover" : "custom exact cover") << "\n";
-	cout << "proof engine = " << (WRITE_PROOFS == 0 ? "no proofs" : (WRITE_PROOFS == 1 ? "DRAT proof per cube" : "internal DRAT proof check and proof size per cube")) << "\n";
+	cout << "proof engine = " << (WRITE_PROOFS == 0 ? "no proofs" : (WRITE_PROOFS == 1 ? "DRAT proof per cube" : "internal LRAT proof check and DRAT proof size per cube")) << "\n";
 	cout << "relation type=4^4 (4444)\n"; 
 	cout << "cubing: " << (cubing_enabled ? "ON" : "OFF") << "\n";
 	if (cubing_enabled) {
@@ -1957,9 +1957,9 @@ int main(int argc, char* argv[]) {
 	solver.set("factorcheck", 0);
 	solver.set("factor", 0);
 #if WRITE_PROOFS == 2
-	// Internal DRAT checking
+	// Internal LRAT checking
 	solver.set("check", 1);
-	solver.set("checkproof", 1);
+	solver.set("checkproof", 2);
 #endif
 	for (auto& [name, value] : solver_overrides) {
 		bool ok = solver.set(name.c_str(), value);

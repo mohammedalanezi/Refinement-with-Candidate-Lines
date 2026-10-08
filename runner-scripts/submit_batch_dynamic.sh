@@ -38,7 +38,7 @@ OUTPUTDIR="${SCRATCH:-}/sat_solver/runs_dynamic"
 
 START=0
 END=6964
-TIME_LIMIT="02:00:00"
+TIME_LIMIT="03:00:00"
 MAX_INFLIGHT=900     # stay safely under the ~1000 pending+running job cap most Alliance Canada general-purpose clusters apply per account.
 THROTTLE=""           # optional: cap concurrently RUNNING tasks this round, e.g. --throttle 100 -> sbatch --array=1-K%100
 SUBMIT_ALL=0          # if 1 (--all flag), submit all eligible tasks at once ignoring MAX_INFLIGHT. Use with --throttle to let
