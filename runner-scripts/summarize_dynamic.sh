@@ -1,9 +1,18 @@
 #!/bin/bash
 # summarize_dynamic.sh: summary table of the template_dynamic runs found in an output directory.
 #
-#   ./summarize_dynamic.sh [OUTPUTDIR] [--csv FILE] [--details] [--only-incomplete] [--refs-from auto|cubes|solutions|logs] [--verify] [--no-dedup]
+#   ./summarize_dynamic.sh [OUTPUTDIR] [--csv FILE] [--details] [--only-incomplete] [--refs-from auto|cubes|solutions|logs] [--verify] [--no-dedup] [--no-cache] [--rebuild-cache]
 #
 # OUTPUTDIR defaults to $SCRATCH/sat_solver/runs_dynamic. Only template_NNNN folders actually present are summarized.
+#
+# Cache (_CACHE.log): when a template is Completed, every value computed for it is saved to template_NNNN/_CACHE.log (plain key=value lines).
+#     Later runs read that single file instead of re-parsing all logs / solutions / blobs. The cache is ignored and rebuilt automatically when
+#       - any other file in the template folder was added, removed or changed size (a rerun, a copy with edits, ...),
+#       - the options that affect the numbers differ (--refs-from, --verify, --no-dedup, python3 availability),
+#       - a field listed in CACHE_FIELDS (below) is missing from the file (e.g. after a new field was added to the script).
+#     A template that is no longer Completed has its stale cache deleted. It is always safe to delete a _CACHE.log by hand.
+#     --no-cache       neither read nor write caches (old behaviour, nothing is touched on disk)
+#     --rebuild-cache  ignore existing caches but write fresh ones for Completed templates
 #
 # Refineemnt flags after the number (never present for source "cubes" unless noted):
 #     *  some cubes were solved in more than one run, so refinements may be counted twice      (solutions / logs source)
@@ -23,7 +32,11 @@ set -uo pipefail
 WORKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$WORKDIR/lib_dynamic.sh"
 
-OUTPUTDIR=""; CSV=""; DETAILS=0; ONLY_INCOMPLETE=0; REFS_FROM="auto"; VERIFY=0; DEDUP=1
+CACHE_NAME="_CACHE.log"
+# The cache file must never be mistaken for a run log.
+if [[ "$CACHE_NAME" == $LOG_GLOB ]]; then echo "LOG_GLOB ($LOG_GLOB) also matches $CACHE_NAME; rename CACHE_NAME in this script" >&2; exit 1; fi
+
+OUTPUTDIR=""; CSV=""; DETAILS=0; ONLY_INCOMPLETE=0; REFS_FROM="auto"; VERIFY=0; DEDUP=1; CACHE_READ=1; CACHE_WRITE=1
 RUNNING_WINDOW_MIN="${RUNNING_WINDOW_MIN:-15}"   # an unfinished template whose newest log changed within this many minutes shows as Running
 while (( $# )); do
     case "$1" in
@@ -33,7 +46,9 @@ while (( $# )); do
         --refs-from) REFS_FROM="$2"; shift 2 ;;
         --verify) VERIFY=1; shift ;;
         --no-dedup) DEDUP=0; shift ;;
-        -h|--help) sed -n '2,34p' "$0"; exit 0 ;;
+        --no-cache) CACHE_READ=0; CACHE_WRITE=0; shift ;;
+        --rebuild-cache) CACHE_READ=0; shift ;;
+        -h|--help) sed -n '2,/^$/p' "$0" | sed '$d'; exit 0 ;;
         *) OUTPUTDIR="$1"; shift ;;
     esac
 done
@@ -93,8 +108,8 @@ solutions_refs() {
     echo "$R $trunc"
 }
 
-# sorted_logs <template_dir> -> the template's logs, oldest run first. A run's age is the start time in its runner header (date=...), not
-# the file mtime (mtime changes when folders are copied or moved); logs without a header fall back to mtime. Ties are broken by job id.
+# sorted_logs <template_dir> -> the template's logs, oldest run first. A run's age is the start time in its runner header (date=...), not the file mtime (mtime changes when folders are copied or moved);
+# logs without a header fall back to mtime. Ties are broken by job id.
 sorted_logs() {
     local dir="$1" f d
     for f in "$dir"/$LOG_GLOB; do
@@ -105,8 +120,8 @@ sorted_logs() {
 }
 
 # Lists the records of proofs_*.drat.blob files, in the order given: one "cube_index<TAB>proof_bytes" line per complete record.
-# Record layout (partial_solution_refinement.cpp): 4-byte cube index, 8-byte length (little-endian), then `length` bytes of DRAT. Only the 12-byte
-# headers are read. A length of 0 is the placeholder of a cube that was still running when the process died, so parsing of that file stops there.
+# Record layout (partial_solution_refinement.cpp): 4-byte cube index, 8-byte length (little-endian), then `length` bytes of DRAT. Only the 12-byte headers are read. 
+# A length of 0 is the placeholder of a cube that was still running when the process died, so parsing of that file stops there.
 PYPROOF=""
 if command -v python3 >/dev/null 2>&1; then
     PYPROOF=$(mktemp --suffix=.py)
@@ -177,24 +192,70 @@ fi
 if (( DEDUP )) && [[ -z "$PYCOUNT" ]]; then echo "NOTE: python3 not found; solutions are counted without deduplication (module load python?)" >&2; fi
 
 tmp=$(mktemp); trap 'rm -f "$tmp" "$tmp.rows" "$tmp.run" "$tmp.blob" "${PYCOUNT:-}" "${PYPROOF:-}"' EXIT
-[[ -n "$CSV" ]] && echo "template,refinements,time_s,ref_per_s,status,runs,complete_runs,split_sections,sections_done,a_squares,log_bytes,solutions_bytes,proofs_bytes,dyn_clause_bytes,slurm_bytes,cnf_bytes,cubes_bytes,total_bytes,r,total_cubes,aut_order,dup_cubes,solutions_truncated,refinements_from_logs,refs_flags,refs_source,refinements_in_files,duplicate_records_removed,proof_bytes,proof_source,proof_cubes_missing" > "$CSV"
 
-shopt -s nullglob
-dirs=("$OUTPUTDIR"/template_*/)
-(( ${#dirs[@]} )) || { echo "No template_* folders in $OUTPUTDIR" >&2; exit 1; }
+# _CACHE.log support
+# =====================================================================================================================================
+# Every per-template value that the table, the CSV and the totals need. 
+# TO ADD A NEW VALUE: set a variable of that name in compute_template, append the name here, and use it wherever you like. Caches written before the change lack the field, so they are rebuilt automatically.
+CACHE_FIELDS=(
+    status runs ncomplete split sec_done sec_total
+    secs secs_i rate refs refs_final refs_logs refs_files dup_recs src mark
+    sq dup_cubes trunc
+    b_log b_sol b_prf b_dyn b_slr b_cnf b_cub b_all
+    r_final total_cubes aut
+    proof_bytes proof_missing proof_src proof_csv proof_disp
+)
+CACHE_FORMAT=1
+# Options that change the computed numbers; a cache written under different options is not reused.
+CACHE_SETTINGS="refs_from=$REFS_FROM dedup=$DEDUP verify=$VERIFY pycount=$([[ -n "$PYCOUNT" ]] && echo 1 || echo 0) pyproof=$([[ -n "$PYPROOF" ]] && echo 1 || echo 0)"
 
-n_total=0; n_done=0; n_marked=0; g_ref=0; g_sq=0; g_time=0; g_refs=0; g_bytes=0
-declare -A n_src=() n_psrc=()
-g_proof=0; n_proof=0
-declare -A G_TYPE=( [logs]=0 [solutions]=0 [proofs]=0 [clauses]=0 [slurm]=0 [cnf]=0 [cubes]=0 )
+# dir_signature <template_dir> -> checksum of the names and sizes of all files in the folder except the cache itself.
+dir_signature() {
+    find "$1" -maxdepth 1 -type f ! -name "$CACHE_NAME" ! -name "$CACHE_NAME.tmp.*" -printf '%f %s\n' 2>/dev/null | LC_ALL=C sort | cksum | awk '{print $1 "-" $2}'
+}
 
-for dir in "${dirs[@]}"; do
-    dir="${dir%/}"; name="${dir##*/}"; tid="${name#template_}"; [[ "$tid" =~ ^[0-9]+$ ]] || continue; id=$((10#$tid))
+# cache_load <template_dir> <signature> -> returns 0 and sets every CACHE_FIELDS variable if the cache is present and valid; otherwise returns 1 and sets nothing.
+cache_load() {
+    local f="$1/$CACHE_NAME" sig="$2" line k
+    local -A c=()
+    [[ -f "$f" ]] || return 1
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ -z "$line" || "$line" == \#* || "$line" != *=* ]] && continue
+        c["${line%%=*}"]="${line#*=}"
+    done < "$f"
+    [[ "${c[cache_format]:-}" == "$CACHE_FORMAT" ]] || return 1
+    [[ "${c[signature]:-}" == "$sig" ]] || return 1
+    [[ "${c[settings]:-}" == "$CACHE_SETTINGS" ]] || return 1
+    for k in "${CACHE_FIELDS[@]}"; do [[ -v "c[$k]" ]] || return 1; done
+    for k in "${CACHE_FIELDS[@]}"; do printf -v "$k" '%s' "${c[$k]}"; done
+    return 0
+}
+
+# cache_write <template_dir> <signature> -> writes the cache atomically; returns 1 if the folder is not writable.
+cache_write() {
+    local f="$1/$CACHE_NAME" sig="$2" t k
+    t="$f.tmp.$$"
+    {
+        echo "# $CACHE_NAME: cached summary of this Completed template, written by summarize_dynamic.sh. Safe to delete; it is rebuilt on the next run."
+        echo "cache_format=$CACHE_FORMAT"
+        echo "generated=$(date +%Y-%m-%dT%H:%M:%S)"
+        echo "signature=$sig"
+        echo "settings=$CACHE_SETTINGS"
+        for k in "${CACHE_FIELDS[@]}"; do printf '%s=%s\n' "$k" "${!k}"; done
+    } > "$t" 2>/dev/null && mv -f "$t" "$f" 2>/dev/null || { rm -f "$t" 2>/dev/null; return 1; }
+}
+
+# compute_template <template_dir> <numeric id>: the full (slow) analysis of one template; sets all CACHE_FIELDS variables plus done_flag.
+# =====================================================================================================================================
+compute_template() {
+    local dir="$1" id="$2"
+    local logs f m wall cubesecs r nosummary newest ncubes_done cubes_missing refs_cubes have_cubes tl est cubes r_abs mism nsec per k s e
+    local n_plog n_pblob uniq_a tot_rec ntrunc
+
     logs=( "$dir"/$LOG_GLOB )
     runs=${#logs[@]}
 
-    # ---- logs are read oldest run first, so for a cube solved in several logs the awk below keeps the line of the LATEST run
-    #      (A squares: latest line; refinements: latest line that carries a "N refinements" count)
+    # ---- logs are read oldest run first, so for a cube solved in several logs the awk below keeps the line of the LATEST run (A squares: latest line; refinements: latest line that carries a "N refinements" count)
     sq=0; secs=0; refs=0; ncomplete=0; newest=0; nosummary=0
     : > "$tmp"
     while read -r f; do
@@ -228,9 +289,7 @@ for dir in "${dirs[@]}"; do
     else
         if (( n_plog > 0 && n_pblob > 0 )); then proof_src="mixed"; elif (( n_plog > 0 )); then proof_src="log"; else proof_src="blob"; fi
         proof_csv="$proof_bytes"; proof_disp="$(human "$proof_bytes")"; (( proof_missing > 0 )) && proof_disp+="<"
-        g_proof=$(( g_proof + proof_bytes )); n_proof=$(( n_proof + 1 ))
     fi
-    n_psrc[$proof_src]=$(( ${n_psrc[$proof_src]:-0} + 1 ))
     dup_cubes=$(awk -F'\t' '{c[$2]++} END{d=0; for(i in c) if(c[i]>1) d++; print d+0}' "$tmp")
     ncubes_done=$(awk -F'\t' '{seen[$2]=1} END{n=0; for(i in seen) n++; print n}' "$tmp")
 
@@ -291,10 +350,47 @@ for dir in "${dirs[@]}"; do
             (( dup_cubes > 0 )) && mark+="*"
             (( nosummary > 0 )) && mark+="<" ;;
     esac
-    n_src[$src]=$(( ${n_src[$src]:-0} + 1 ))
 
     rate=$(awk -v s="$refs_final" -v t="$secs" 'BEGIN{ if (t>0) printf "%.1f", s/t; else printf "0.0" }')
     secs_i=$(awk -v t="$secs" 'BEGIN{printf "%.0f", t}')
+}
+
+# main
+# =====================================================================================================================================
+[[ -n "$CSV" ]] && echo "template,refinements,time_s,ref_per_s,status,runs,complete_runs,split_sections,sections_done,a_squares,log_bytes,solutions_bytes,proofs_bytes,dyn_clause_bytes,slurm_bytes,cnf_bytes,cubes_bytes,total_bytes,r,total_cubes,aut_order,dup_cubes,solutions_truncated,refinements_from_logs,refs_flags,refs_source,refinements_in_files,duplicate_records_removed,proof_bytes,proof_source,proof_cubes_missing" > "$CSV"
+
+shopt -s nullglob
+dirs=("$OUTPUTDIR"/template_*/)
+(( ${#dirs[@]} )) || { echo "No template_* folders in $OUTPUTDIR" >&2; exit 1; }
+
+n_total=0; n_done=0; n_marked=0; g_ref=0; g_sq=0; g_time=0; g_refs=0; g_bytes=0
+n_cache_hit=0; n_cache_written=0; n_cache_failed=0
+declare -A n_src=() n_psrc=()
+g_proof=0; n_proof=0
+declare -A G_TYPE=( [logs]=0 [solutions]=0 [proofs]=0 [clauses]=0 [slurm]=0 [cnf]=0 [cubes]=0 )
+
+for dir in "${dirs[@]}"; do
+    dir="${dir%/}"; name="${dir##*/}"; tid="${name#template_}"; [[ "$tid" =~ ^[0-9]+$ ]] || continue; id=$((10#$tid))
+
+    # ---- values come from the template's _CACHE.log when it is valid, otherwise from the full analysis (and a Completed template is then cached)
+    from_cache=0
+    if (( CACHE_READ )) && [[ -f "$dir/$CACHE_NAME" ]]; then
+        if cache_load "$dir" "$(dir_signature "$dir")"; then from_cache=1; done_flag=1; n_cache_hit=$((n_cache_hit+1)); fi
+    fi
+    if (( ! from_cache )); then
+        compute_template "$dir" "$id"
+        if (( CACHE_WRITE )); then
+            if (( done_flag )); then
+                if cache_write "$dir" "$(dir_signature "$dir")"; then n_cache_written=$((n_cache_written+1)); else n_cache_failed=$((n_cache_failed+1)); fi
+            else
+                rm -f "$dir/$CACHE_NAME" 2>/dev/null     # no longer Completed (e.g. a rerun was started): a stale cache must not survive
+            fi
+        fi
+    fi
+
+    n_src[$src]=$(( ${n_src[$src]:-0} + 1 ))
+    n_psrc[$proof_src]=$(( ${n_psrc[$proof_src]:-0} + 1 ))
+    if [[ "$proof_src" != "N/A" ]]; then g_proof=$(( g_proof + proof_bytes )); n_proof=$(( n_proof + 1 )); fi
 
     n_total=$((n_total+1)); (( done_flag )) && n_done=$((n_done+1))
     g_sq=$((g_sq+sq)); g_ref=$((g_ref+refs_final)); [[ -n "$mark" ]] && n_marked=$((n_marked+1)); g_time=$(awk -v a="$g_time" -v b="$secs" 'BEGIN{print a+b}'); g_refs=$((g_refs+refs)); g_bytes=$((g_bytes+b_all))
@@ -334,5 +430,10 @@ awk -F'\t' '$20 ~ /^[0-9]+$/ {a[++n]=$20+0} END{ if(n==0){print "  |Aut(T)|: not
 echo "  Disk used by file type:"
 for k in logs solutions proofs clauses slurm cnf cubes; do printf '    %-10s %10s  (%d bytes)\n' "$k" "$(human "${G_TYPE[$k]}")" "${G_TYPE[$k]}"; done
 printf '    %-10s %10s  (%d bytes)\n' "ALL" "$(human "$g_bytes")" "$g_bytes"
+if (( CACHE_READ || CACHE_WRITE )); then
+    printf '  %s: %d template(s) read from cache, %d cache(s) written' "$CACHE_NAME" "$n_cache_hit" "$n_cache_written"
+    (( n_cache_failed > 0 )) && printf ', %d could NOT be written (folder not writable?)' "$n_cache_failed"
+    echo
+fi
 [[ -n "$CSV" ]] && echo "  CSV written to $CSV"
 rm -f "$tmp.rows" "$tmp.blob"
