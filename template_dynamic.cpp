@@ -60,11 +60,12 @@ namespace TemplateAutoNS {
 using namespace std;
 
 // ---- Build configuration ----
-#define ISCLUSTER 1
+#define ISCLUSTER 0
 // Refinement step (see partial_solution_refinement.cpp): 0 = custom exact cover, 1 = exact cover as a SAT instance.
 #define SATREFINEMENT 1
 #define WRITE_PROOFS 2            // 0 = none, 1 = one DRAT proof per cube solve, 2 = internal LRAT checking (checkproof) + DRAT proof size (ProofSizeTracer) per cube
 #define WRITE_DYNAMIC_CLAUSES 1   // log automorphism-justified blocks to dynamic_clauses_<ID>.bin
+#define CHECK_ISOMORPHISM 0       // 0 = keep every pair, 1 = keep one (A,B) per isomorphism class (nauty, see 4net_nauty.cpp); duplicates are only counted
 
 constexpr int order = 10;
 
@@ -1447,6 +1448,9 @@ struct DynamicAOnlyPolicy {
 		if (g_raw_solutions_seen % 50000 == 0)
 			cout << "[A " << g_raw_solutions_seen << "] "
 				 << "refinements=" << total_refinements
+#if CHECK_ISOMORPHISM == 1
+				 << " duplicate_refinements=" << total_duplicate_refinements
+#endif
 				 << " (partial_count=" << partial_count << ")"
 				 << " partial_calls=" << g_a_partial_calls.load(std::memory_order_relaxed)
 				 << " partial_rejects=" << g_a_partial_rejects.load(std::memory_order_relaxed)
@@ -1721,6 +1725,7 @@ static vector<vector<int>> tuneRParameter(CaDiCaL::Solver& base_solver, const Ex
 	// processLine() counts partial_count even in test mode, so it must be reset; the other two are reset for robustness.
 	partial_count = 0;
 	total_refinements = 0;
+	total_duplicate_refinements = 0;
 	skipped_partial_solutions = 0;
 
 	total_cube_tune_time = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
@@ -1764,7 +1769,7 @@ static long long solveOneCube(CaDiCaL::Solver& base_solver, const ExhaustiveSear
 	total_cube_creation_time += create_elapsed;
 
 	t0 = chrono::steady_clock::now();
-	copy.solve();
+	int res = copy.solve();
 	copy.disconnect_terminator();
 	double solve_elapsed = chrono::duration<double>(chrono::steady_clock::now() - t0).count();
 	total_cube_solve_time += solve_elapsed;
@@ -1773,6 +1778,14 @@ static long long solveOneCube(CaDiCaL::Solver& base_solver, const ExhaustiveSear
 	if (g_proof_blob_fp)
 		end_cube_proof_record(copy, proof_length_field_pos, proof_start_pos);
 #endif
+
+	if (res == 0 && g_stop_requested) {
+#if WRITE_PROOFS == 2
+		copy.disconnect_proof_tracer(&proof_size_tracer);
+#endif
+		cerr << "[cubing] Cube " << cube_index << " INTERRUPTED mid-solve (partial, will be redone)\n";
+		return 0;
+	}
 
  	long long count = propagator.get_solution_count();
 
@@ -1934,6 +1947,7 @@ int main(int argc, char* argv[]) {
 		cout << "template_id=" << TEMPLATE_ID << "\n";
 	cout << "refinement engine=" << (SATREFINEMENT ? "SAT exact cover" : "custom exact cover") << "\n";
 	cout << "proof engine = " << (WRITE_PROOFS == 0 ? "no proofs" : (WRITE_PROOFS == 1 ? "DRAT proof per cube" : "internal LRAT proof check and DRAT proof size per cube")) << "\n";
+	cout << "nauty isomorphism=" << (CHECK_ISOMORPHISM ? "TRUE" : "FALSE") << "\n";
 	cout << "relation type=4^4 (4444)\n"; 
 	cout << "cubing: " << (cubing_enabled ? "ON" : "OFF") << "\n";
 	if (cubing_enabled) {
@@ -2043,6 +2057,9 @@ int main(int argc, char* argv[]) {
 		cout << "*** RUN INTERRUPTED (signal " << (int)g_stop_signal << ") -- results below are partial/incomplete ***\n";
 	cout << "Complete A squares enumerated: " << raw_solution_count << "\n";
 	cout << "Refinements found: " << total_refinements << "\n";
+#if CHECK_ISOMORPHISM == 1
+	cout << "Duplicate refinements (isomorphic to an earlier one): " << total_duplicate_refinements << "\n";
+#endif
 	cout << "Partial A candidates processed: " << partial_count << "\n";
 	cout << "A candidates with no refinement: " << skipped_partial_solutions << "\n";
 	cout << "\n----- A-only dynamic pruning stats -----\n";
@@ -2112,6 +2129,7 @@ int main(int argc, char* argv[]) {
 	outfile.close();
 	close_dynamic_clauses();
 	close_proof_blob();
+	freePrecomputeDataStructures();
 
 	// 128 + signal if the run was cut short by SIGINT/SIGTERM, so wrapper scripts can tell an incomplete template from a clean one via $?.
 	return stop_exit_code();
