@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=tpls_refine
 #SBATCH --cpus-per-task=1
-#SBATCH --mem-per-cpu=8G
+#SBATCH --mem-per-cpu=4G
 #
 # --account, --time, --array, --output and --export are supplied on the sbatch command line by submit_batch_dynamic.sh and override the
 # placeholders below. They're only here so this script is also sbatch-able by itself while testing on a single index.
