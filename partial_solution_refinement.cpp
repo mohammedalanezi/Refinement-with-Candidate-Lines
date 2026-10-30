@@ -51,6 +51,15 @@
 #define WRITE_DYNAMIC_CLAUSES 0
 #endif
 
+// Isomorphism check of the refinements (uses 4net_nauty.cpp):
+//   0 -- every pair that passes the pair filter is counted and written
+//   1 -- each (A,B) pair is canonically labelled with nauty (rows, columns and the symbols of each square may be permuted; no transpose
+//        or A/B swap). Only the first pair of each isomorphism class is counted in total_refinements and written to solutions_<ID>.bin;
+//        the others increase total_duplicate_refinements.
+#ifndef CHECK_ISOMORPHISM
+#define CHECK_ISOMORPHISM 0
+#endif
+
 using namespace std;
 
 #ifndef ORDER_DEFINED
@@ -67,7 +76,8 @@ uint64_t last_word_mask = 0; // valid bits of the last word of a row
 
 long skipped_partial_solutions = 0; // A's with no possible B
 long partial_count = 0;             // A's handed to processLine()
-long total_refinements = 0;         // (A,B) pairs found (after the pair filter)
+long total_refinements = 0;         // (A,B) pairs found (after the pair filter, and the isomorphism check if enabled)
+long long total_duplicate_refinements = 0; // pairs isomorphic to an earlier one (only used if CHECK_ISOMORPHISM == 1)
 int count_A = 0;
 int count_B = 0;
 
@@ -137,6 +147,26 @@ struct SignalTerminator : public CaDiCaL::Terminator {
 	bool terminate() override { return g_stop_requested != 0; }
 };
 SignalTerminator g_signal_terminator;
+
+#if CHECK_ISOMORPHISM == 1
+#include "4net_nauty.cpp"
+
+// Global nauty worker: its certificate set persists for the whole run, across A's and cubes. Heap allocated in setup() (it is large).
+static WorkerState* g_iso_worker = nullptr;
+
+// True iff the pair (A,B) (flat 10x10 symbol grids) is the first of its isomorphism class seen so far.
+static bool isNewIsomorphismClass(const uint8_t A[100], const uint8_t B[100]) {
+	int Ai[10][10], Bi[10][10];
+	for (int r = 0; r < 10; ++r)
+		for (int c = 0; c < 10; ++c) {
+			Ai[r][c] = A[r * 10 + c];
+			Bi[r][c] = B[r * 10 + c];
+		}
+	const size_t before = g_iso_worker->certs.size();
+	g_iso_worker->process_pair(Ai, Bi);
+	return g_iso_worker->certs.size() > before;
+}
+#endif
 
 // Frequency squares of the two "trivial" incidence bits (row < 4, column < 4) that complete the four-bit weight used by the candidate-line encoding.
 const vector<vector<vector<int>>> trivialTemplate = { {
@@ -555,6 +585,11 @@ void precomputeDataStructures() {
 	cout << "\tPrecomputed intersections using masks in " << elapsed << " seconds." << endl;
 }
 
+void freePrecomputeDataStructures() {
+	delete[] intersects_once_BA; intersects_once_BA = nullptr;
+	delete[] intersecting_B_buf; intersecting_B_buf = nullptr;
+}
+
 // ---------------------------------------------------------------------------
 // B lines and exact covers
 // ---------------------------------------------------------------------------
@@ -854,6 +889,26 @@ bool solve_partial_solution(const int sym_A_idx[order]) {
 		if (refinement_count == 0) return true;
 	}
 
+#if CHECK_ISOMORPHISM == 1
+	// Keep only pairs whose isomorphism class has not been seen; count the rest as duplicates.
+	{
+		uint8_t A[100], B[100];
+		linesToGrid(sym_A_idx, cand_masks_A, A);
+
+		size_t keep = 0;
+		for (size_t k = 0; k < found_B_refinements.size(); ++k) {
+			linesToGrid(found_B_refinements[k].data(), cand_masks_B, B);
+			if (isNewIsomorphismClass(A, B))
+				found_B_refinements[keep++] = found_B_refinements[k];
+			else
+				++total_duplicate_refinements;
+		}
+		found_B_refinements.resize(keep);
+		refinement_count = (long int)keep;
+		if (refinement_count == 0) return true;
+	}
+#endif
+
 	total_refinements += refinement_count;
 #if WRITE_REFINEMENTS == 1
 	write_separator(outfile);
@@ -891,6 +946,12 @@ int setup(const vector<vector<vector<int>>>& tmpl, string path, string ID) {
 #if WRITE_PROOFS == 1
 	if (!open_proof_blob(output_path, ID))
 		return 1;
+#endif
+
+#if CHECK_ISOMORPHISM == 1
+	init_base_graph();
+	init_fixed_partition();
+	g_iso_worker = new WorkerState();
 #endif
 
 	ios::sync_with_stdio(false);
