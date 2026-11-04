@@ -984,10 +984,10 @@ static int g_dynamic_id_bits = 1;
 // Write-time de-duplication of records with bounded memory.
 //
 // Records are canonical, so equal records have equal bytes.
-// The table starts at 64Ki slots and doubles up to DYNAMIC_DEDUP_MAX_MB (default 512, about 23 million records; 0 disables de-duplication).
+// The table starts at 64Ki slots and doubles up to DYNAMIC_DEDUP_MAX_MB (default 1024, about 23 million records; 0 disables de-duplication).
 // ---------------------------------------------------------------------------
 #ifndef DYNAMIC_DEDUP_MAX_MB
-#define DYNAMIC_DEDUP_MAX_MB 512
+#define DYNAMIC_DEDUP_MAX_MB 1024
 #endif
 
 struct DynFingerprint {
@@ -1051,10 +1051,19 @@ struct DynamicClauseDedup {
 };
 
 static inline DynFingerprint dynFingerprint(const std::string& rec) {
-	DynFingerprint f;
-	f.lo = es_wyhash(rec.data(), rec.size(), 0x2545f4914f6cdd1dULL);
-	f.hi = es_wyhash(rec.data(), rec.size(), 0x9e6c63d0876a9a99ULL);
-	return f;
+	const auto* p = reinterpret_cast<const unsigned char*>(rec.data());
+	const uint64_t n = rec.size();
+
+	uint64_t h1 = 0x517cc1b727220a95ULL ^ n;
+	uint64_t h2 = 0x243f6a8885a308d3ULL + n;
+
+	for (size_t i = 0; i < n; ++i) {
+		const uint64_t x = p[i];
+		h1 = es_mix64(h1 ^ (x + 0x9e3779b97f4a7c15ULL));
+		h2 = es_mix64(h2 + x * 0xff51afd7ed558ccdULL + 0xc4ceb9fe1a85ec53ULL);
+	}
+
+	return {h1, h2};
 }
 
 static DynamicClauseDedup g_dynamicDedup;
@@ -1970,6 +1979,8 @@ int main(int argc, char* argv[]) {
 	solver.set("inprocessing", 0);
 	solver.set("factorcheck", 0);
 	solver.set("factor", 0);
+	solver.set("checkwitness", 0); // we never have a SAT result from a solve due to exhaustive search
+	solver.set("checkfailed", 0); // we never use assumptions
 #if WRITE_PROOFS == 2
 	// Internal LRAT checking
 	solver.set("check", 1);
