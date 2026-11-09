@@ -205,17 +205,34 @@ lookup_params() {
     echo "$r $hours"
 }
 
-# build_completed_set <outputdir> <assoc_array_name>  -> completed[i]=1 for every fully finished template
+# build_completed_set <outputdir> <assoc_array_name> [cache_file]
+#   -> completed[i]=1 (i is a plain integer, no leading zeros) for every fully finished template.
 build_completed_set() {
     local outputdir="$1"
     local -n _out="$2"
-    local dir idx tuning_log est cubes r_abs n per k s e all_done
+    local cache="${3:-}"
+    local dir idx key tuning_log est cubes r_abs n per k s e all_done dirty=0
 
+    # ---- load cache ----
+    if [[ -n "$cache" && -f "$cache" ]]; then
+        while read -r key; do
+            [[ "$key" =~ ^[0-9]+$ ]] || continue
+            key=$((10#$key))
+            if [[ -d "$outputdir/template_$(printf '%04d' "$key")" ]]; then
+                _out[$key]=1
+            else
+                dirty=1    # directory was deleted -> drop the stale entry
+            fi
+        done < "$cache"
+    fi
+
+    # ---- scan only what the cache doesn't already cover ----
     shopt -s nullglob
     for dir in "$outputdir"/template_*/; do
         idx="${dir%/}"; idx="${idx##*/template_}"
-        idx="${idx##0}"; idx="${idx:-0}"
         [[ "$idx" =~ ^[0-9]+$ ]] || continue
+        idx=$((10#$idx))
+        [[ -n "${_out[$idx]:-}" ]] && continue          # cache hit
 
         tuning_log=$(find_tuning_log "$dir")
         if [[ -n "$tuning_log" ]] && read -r est cubes r_abs _ < <(get_tuning_estimate "$tuning_log"); then
@@ -225,17 +242,27 @@ build_completed_set() {
         fi
 
         if (( n <= 1 )); then
-            is_section_completed "$dir" 0 && _out[$idx]=1
+            if is_section_completed "$dir" 0; then _out[$idx]=1; dirty=1; fi
         else
             all_done=1
             for (( k = 0; k < n; k++ )); do
                 read -r s e < <(section_bounds "$k" "$per" "$cubes")
                 is_section_completed "$dir" "$e" || { all_done=0; break; }
             done
-            (( all_done )) && _out[$idx]=1
+            if (( all_done )); then _out[$idx]=1; dirty=1; fi
         fi
     done
     shopt -u nullglob
+
+    # ---- persist ----
+    if [[ -n "$cache" ]] && (( dirty )); then
+        local tmp="${cache}.tmp.$$"
+        if (( ${#_out[@]} )); then
+            printf '%s\n' "${!_out[@]}" | sort -n > "$tmp" && mv -f "$tmp" "$cache"
+        else
+            : > "$tmp" && mv -f "$tmp" "$cache"
+        fi
+    fi
 }
 
 parse_hms_to_seconds() {

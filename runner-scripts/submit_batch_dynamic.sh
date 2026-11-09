@@ -16,6 +16,10 @@
 #   ./submit_batch_dynamic.sh --account def-yourpi --time 02:00:00   # round 1 (default)
 #   ./submit_batch_dynamic.sh --account def-yourpi --time 04:00:00   # round 2: retries + longer-r ranges
 #
+# Completed-template cache (speeds up rescans; completion never reverts):
+#   --no-cache        ignore and don't write the cache
+#   --rebuild-cache   delete the cache and rescan everything (use if you deleted logs but kept template dirs)
+#
 # Re-run it as many times as you like (e.g. once whenever you check in, or from a tmux loop) until it reports "Nothing left to do."
 #
 set -uo pipefail
@@ -44,6 +48,8 @@ THROTTLE=""           # optional: cap concurrently RUNNING tasks this round, e.g
 SUBMIT_ALL=0          # if 1 (--all flag), submit all eligible tasks at once ignoring MAX_INFLIGHT. Use with --throttle to let
                       # Slurm manage drip-feeding instead of re-running this script manually.
 ACCOUNT=""
+USE_CACHE=1           # cache the set of fully completed templates in $OUTPUTDIR/.completed_cache_dynamic.txt (--no-cache disables)
+REBUILD_CACHE=0       # --rebuild-cache: delete the cache and rescan every template
 
 # Log file for all submit_batch_dynamic.sh runs. Each invocation appends a timestamped block so you have a full history of what was submitted when.
 # Kept in project space alongside the scripts (not scratch) so it survives the 60-day scratch purge.
@@ -62,6 +68,8 @@ while [[ $# -gt 0 ]]; do
         --max-inflight) MAX_INFLIGHT="$2"; shift 2 ;;
         --throttle)     THROTTLE="$2";   shift 2 ;;
         --all)          SUBMIT_ALL=1;    shift 1 ;;
+        --no-cache)      USE_CACHE=0;     shift 1 ;;
+        --rebuild-cache) REBUILD_CACHE=1; shift 1 ;;
         --submitlog)    SUBMITLOG="$2";  shift 2 ;;
         -h|--help)
             grep '^#' "$0" | sed 's/^# \{0,1\}//'
@@ -97,9 +105,14 @@ ROUND_SECONDS=$(parse_hms_to_seconds "$TIME_LIMIT")
 echo "Output directory:      $OUTPUTDIR"
 echo "Submit log:            $SUBMITLOG"
 
-# ---- 1. What's already completed? (one pass over the output directory) ----
+# ---- 1. What's already completed? (cached; only uncached templates are scanned) ----
+CACHE_FILE=""
+if (( USE_CACHE )); then
+    CACHE_FILE="$OUTPUTDIR/.completed_cache_dynamic.txt"
+    (( REBUILD_CACHE )) && rm -f "$CACHE_FILE"
+fi
 declare -A completed
-build_completed_set "$OUTPUTDIR" completed
+build_completed_set "$OUTPUTDIR" completed "$CACHE_FILE"
 
 # ---- 2. What's currently queued or running from earlier submissions? ----
 # Keyed "i:start:end" so distinct sections of the same template i are tracked independently.
@@ -122,10 +135,8 @@ done < <(squeue -u "$USER" -h -r -n "$JOBNAME" -t PD,R -o "%i" 2>/dev/null)
 candidates=()
 deferred_needs_more_time=0
 for i in $(seq "$START" "$END"); do
-    key=$(printf "%04d" "$i")   # "0038"
-    key="${key##0}"             # "038"  (matches lib_dynamic.sh)
-    [[ -v completed[$key] ]] && continue
- 
+    [[ -n "${completed[$i]:-}" ]] && continue
+
     template_dir="$OUTPUTDIR/template_$(printf '%04d' "$i")"
     pending=()
     if [[ -d "$template_dir" ]]; then

@@ -1979,8 +1979,8 @@ int main(int argc, char* argv[]) {
 	solver.set("inprocessing", 0);
 	solver.set("factorcheck", 0);
 	solver.set("factor", 0);
-	solver.set("checkwitness", 0); // we never have a SAT result from a solve due to exhaustive search
-	solver.set("checkfailed", 0); // we never use assumptions
+	solver.set("checkwitness", 0); // we never have a SAT result from a solve due to exhaustive search, slightly lowers memory usage
+	solver.set("checkfailed", 0); // we never use assumptions, halves memory usage
 #if WRITE_PROOFS == 2
 	// Internal LRAT checking
 	solver.set("check", 1);
